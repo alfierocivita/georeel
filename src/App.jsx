@@ -1,5 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import Globe from 'globe.gl';
+import { feature } from 'topojson-client';
+import countriesTopo from 'world-atlas/countries-110m.json';
 import { motion, Reorder } from 'framer-motion';
 import {
   Play, Pause, Download, Image as ImageIcon, Plus, Trash2, Edit2,
@@ -103,6 +105,27 @@ function wrapText(ctx, text, x, y, maxW, lh, maxLines) {
   }
   ctx.fillText(line, x, y);
   return y + lh;
+}
+
+// ---------- Country border highlight ----------
+const COUNTRY_FEATURES = feature(countriesTopo, countriesTopo.objects.countries).features;
+
+function pointInPoly(lng, lat, geometry) {
+  if (!geometry) return false;
+  const polys = geometry.type === 'MultiPolygon' ? geometry.coordinates : [geometry.coordinates];
+  return polys.some(([outer]) => {
+    let inside = false;
+    for (let i = 0, j = outer.length - 1; i < outer.length; j = i++) {
+      const [xi, yi] = outer[i], [xj, yj] = outer[j];
+      if ((yi > lat) !== (yj > lat) && lng < ((xj - xi) * (lat - yi)) / (yj - yi) + xi)
+        inside = !inside;
+    }
+    return inside;
+  });
+}
+
+function findCountry(lat, lng) {
+  return COUNTRY_FEATURES.find(f => pointInPoly(lng, lat, f.geometry)) ?? null;
 }
 
 function App() {
@@ -280,6 +303,25 @@ function App() {
       return { startLat: n.lat, startLng: n.lng, endLat: next.lat, endLng: next.lng };
     }));
   }, [news, theme.showRoutes, theme.preset]);
+
+  // Country border highlight
+  useEffect(() => {
+    const g = globeInstance.current;
+    if (!g) return;
+    const item = news[currentIndex];
+    const country = item ? findCountry(item.lat, item.lng) : null;
+    const a = GLOBE_PRESETS[theme.preset].accent;
+    if (country) {
+      g.polygonsData([country])
+       .polygonAltitude(0.005)
+       .polygonCapColor(() => a + '18')
+       .polygonSideColor(() => 'rgba(0,0,0,0)')
+       .polygonStrokeColor(() => a)
+       .polygonsTransitionDuration(400);
+    } else {
+      g.polygonsData([]);
+    }
+  }, [news, currentIndex, theme.preset]);
 
   // Cleanup timer on unmount
   useEffect(() => () => { if (playState.current.timer) clearTimeout(playState.current.timer); }, []);
