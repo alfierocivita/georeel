@@ -74,6 +74,13 @@ const SAMPLE_NEWS = [
   { id: 4, title: "Accordo storico sul clima: 190 nazioni firmano il patto", text: "Al vertice di Nairobi si raggiunge l'intesa per ridurre le emissioni del 45% entro il 2035.", category: "Clima", date: "2026-05-30", source: "The Guardian", nation: "Kenya", lat: -1.2921, lng: 36.8219 },
 ];
 
+// Detect best video format once at load (MP4 preferred for direct playback)
+const VIDEO_MIME =
+  typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported('video/mp4; codecs=avc1') ? 'video/mp4; codecs=avc1' :
+  typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported('video/mp4') ? 'video/mp4' :
+  'video/webm';
+const VIDEO_EXT = VIDEO_MIME.startsWith('video/mp4') ? 'MP4' : 'WEBM';
+
 // Module-scope helpers (out of render for purity)
 const newId = () => Date.now();
 const fileStamp = () => Date.now();
@@ -584,9 +591,13 @@ function App() {
   const exportVideo = () => {
     const g = getGlobeCanvas();
     if (!g || !g.captureStream) { showToast('Cattura video non supportata dal browser', 'error'); return; }
-    const mimeType = MediaRecorder.isTypeSupported('video/webm; codecs=vp9') ? 'video/webm; codecs=vp9'
-      : MediaRecorder.isTypeSupported('video/webm') ? 'video/webm' : null;
+    const mimeType =
+      MediaRecorder.isTypeSupported('video/mp4; codecs=avc1') ? 'video/mp4; codecs=avc1' :
+      MediaRecorder.isTypeSupported('video/mp4') ? 'video/mp4' :
+      MediaRecorder.isTypeSupported('video/webm; codecs=vp9') ? 'video/webm; codecs=vp9' :
+      MediaRecorder.isTypeSupported('video/webm') ? 'video/webm' : null;
     if (!mimeType) { showToast('Formato video non supportato', 'error'); return; }
+    const ext = mimeType.startsWith('video/mp4') ? 'mp4' : 'webm';
     const W = g.width, H = g.height, s = W / 360;
     const comp = document.createElement('canvas'); comp.width = W; comp.height = H;
     const ctx = comp.getContext('2d');
@@ -598,9 +609,9 @@ function App() {
     rec.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
     rec.onstop = () => {
       cancelAnimationFrame(raf);
-      const blob = new Blob(chunks, { type: 'video/webm' });
+      const blob = new Blob(chunks, { type: mimeType });
       const url = URL.createObjectURL(blob);
-      const a = document.createElement('a'); a.href = url; a.download = `GeoReel_${new Date().toISOString().slice(0, 10)}.webm`; a.click();
+      const a = document.createElement('a'); a.href = url; a.download = `GeoReel_${new Date().toISOString().slice(0, 10)}.${ext}`; a.click();
       URL.revokeObjectURL(url);
       setIsExporting(false); stopPreview();
     };
@@ -768,10 +779,10 @@ function App() {
                 <div>
                   <div className="uppercase tracking-wider text-[11px] font-semibold text-slate-400 mb-3">Esporta</div>
                   <div className="space-y-2">
-                    <button onClick={exportVideo} disabled={isExporting || news.length === 0} className="w-full flex items-center justify-center gap-2 py-3.5 rounded-2xl bg-white text-black font-semibold text-sm disabled:bg-slate-700 disabled:text-slate-400">{isExporting ? <>⏳ REGISTRAZIONE...</> : <><Download className="w-4 h-4" /> VIDEO REEL (WEBM)</>}</button>
+                    <button onClick={exportVideo} disabled={isExporting || news.length === 0} className="w-full flex items-center justify-center gap-2 py-3.5 rounded-2xl bg-white text-black font-semibold text-sm disabled:bg-slate-700 disabled:text-slate-400">{isExporting ? <>⏳ REGISTRAZIONE...</> : <><Download className="w-4 h-4" /> VIDEO REEL ({VIDEO_EXT})</>}</button>
                     <button onClick={exportPNG} disabled={!currentNews} className="w-full flex items-center justify-center gap-2 py-3 text-sm rounded-2xl border border-slate-800 hover:bg-slate-800 disabled:opacity-40"><ImageIcon className="w-4 h-4" /> COVER PNG</button>
                   </div>
-                  <div className="mt-3 text-[10px] leading-snug text-slate-600">Il testo della card viene impresso nel video. Converti in MP4 con CloudConvert se serve.</div>
+                  <div className="mt-3 text-[10px] leading-snug text-slate-600">Card impressa nel video • {VIDEO_EXT === 'MP4' ? 'MP4 nativo ✓' : 'WEBM — converti su CloudConvert se serve'}</div>
                 </div>
               </>
             )}
