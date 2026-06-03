@@ -62,8 +62,8 @@ const DEFAULT_THEME = {
   showCards: true,
   card: {
     position: 'bottom', align: 'left', width: 304, radius: 16,
-    titleFont: 'Playfair Display', titleSize: 16, textSize: 12.5,
-    titleColor: '#f8fafc', textColor: '#cbd5e1',
+    titleFont: 'Playfair Display', bodyFont: 'Inter', titleSize: 16, textSize: 12.5,
+    titleColor: '#f8fafc', textColor: '#cbd5e1', metaColor: '#94a3b8',
     bgColor: '#0b1220', bgOpacity: 0.92, accentColor: '#ff3b3b', borderWidth: 2,
     transitionType: 'slide', transitionMs: 350,
     fields: { category: true, date: true, body: true, nation: true, source: true },
@@ -178,16 +178,20 @@ const hasGeo = (item) => item && item.type !== 'info' && Number.isFinite(item.la
 const lerp = (a, b, t) => a + (b - a) * t;
 const lerpLng = (a, b, t) => { const d = ((b - a + 540) % 360) - 180; return a + d * t; };
 const easeInOut = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
+const smootherstep = (t) => { const x = clamp01(t); return x * x * x * (x * (x * 6 - 15) + 10); };
 
 // Slow "satellite filming" orbit applied while the camera holds over a target.
 // intensity 0..1 → subtle, slow, never fully stops. Deterministic from holdMs.
+// A smootherstep ramp eases the offset in from ZERO so it joins the zoom-in with
+// no cut/jump (both lat & lng start exactly at the target).
 const driftPov = (base, holdMs, intensity) => {
   if (!intensity || intensity <= 0) return base;
   const amp = intensity * 2.4; // degrees of sway at 100%
+  const ramp = smootherstep(holdMs / 1300); // ease drift in over ~1.3s
   return {
-    lat: base.lat + amp * 0.6 * Math.sin(holdMs * 0.00045),
-    lng: base.lng + amp * Math.cos(holdMs * 0.00034),
-    alt: base.alt * (1 + intensity * 0.035 * Math.sin(holdMs * 0.00028)),
+    lat: base.lat + ramp * amp * 0.6 * Math.sin(holdMs * 0.00045),
+    lng: base.lng + ramp * amp * Math.sin(holdMs * 0.00034),
+    alt: base.alt * (1 + ramp * intensity * 0.035 * Math.sin(holdMs * 0.00028)),
   };
 };
 
@@ -210,9 +214,8 @@ const CLOUD_PRESETS = {
   heavy:  { label: 'Dense',   opacity: 0.52, bumpScale: 2.6 },
 };
 
-// Export quality tiers: resolution × fps.
-// Globe always renders at native 720×1280 (fast). Only the 2D composite canvas
-// changes size, so card text stays sharp at any resolution.
+// Export quality tiers: composition resolution × fps.
+// Globe renders at export res capped to 1440p; card/text drawn at full res.
 const EXPORT_TIERS = {
   fast: { label: 'Veloce 1080p·30fps', res: 1080, fps: 30 },
   hd:   { label: 'HQ 1080p·60fps',    res: 1080, fps: 60 },
@@ -227,11 +230,16 @@ function buildStoryboard(clips, st, cardTransMs) {
   segs.push({ t0: 0, t1: st.introMs, kind: 'intro', cam: start, clip: clips.length ? 0 : -1, animate: false });
   t = st.introMs;
   let prev = start;
+  const drift0 = st.driftIntensity ?? 0;
   clips.forEach((clip, i) => {
     const dur = clip.duration || st.holdMs;
     const to = hasGeo(clip) ? { lat: clip.lat, lng: clip.lng, alt: st.altitude } : prev;
     segs.push({ t0: t, t1: t + dur, kind: 'clip', from: prev, to, clip: i, flyMs: st.flyMs, animate: !(i === 0 && st.introMs > 0) });
-    t += dur; prev = to;
+    t += dur;
+    // Hand off the ACTUAL drifted camera position to the next clip's fly start,
+    // so there is no jump at the clip boundary when drift is active.
+    const holdEnd = Math.max(0, dur - st.flyMs * 1.05);
+    prev = driftPov(to, holdEnd, drift0);
   });
   const reelEnd = t;
   let total = t;
@@ -600,7 +608,9 @@ function App() {
 
   useEffect(() => () => { clearTimeout(playState.current.slideTimer); clearTimeout(playState.current.zoomTimer); clearTimeout(playState.current.driftTimer); }, []);
 
-  const getCategoryColor = (c) => CATEGORY_COLORS[c] || '#64748b';
+  const getCategoryColor = (c) => CATEGORY_COLORS[c] || accent || '#64748b';
+  // Per-item category color: explicit override → preset → accent
+  const resolveCatColor = (item, acc) => item?.categoryColor || CATEGORY_COLORS[item?.category] || acc || '#64748b';
 
   const playStep = (i) => {
     const list = newsRef.current;
@@ -699,10 +709,12 @@ function App() {
     const cw = c.width * s;
     const innerW = cw - pad * 2;
 
+    const bodyFam = FONT_FAMILY[c.bodyFont] || FONT_FAMILY.Inter;
+    const metaCol = c.metaColor || '#94a3b8';
     ctx.textBaseline = 'alphabetic';
     ctx.font = `700 ${c.titleSize * s}px ${FONT_FAMILY[c.titleFont]}`;
     const titleLines = wrapLines(ctx, item.title, innerW, 3);
-    ctx.font = `${c.textSize * s}px ${FONT_FAMILY.Inter}`;
+    ctx.font = `${c.textSize * s}px ${bodyFam}`;
     const bodyLines = f.body ? wrapLines(ctx, item.text, innerW, 4) : [];
 
     const titleLH = c.titleSize * 1.28 * s;
@@ -749,12 +761,12 @@ function App() {
 
     // meta row
     if (hasMeta) {
-      const catColor = getCategoryColor(item.category);
+      const catColor = resolveCatColor(item, themeRef.current.accent);
       ctx.textBaseline = 'middle';
       if (f.category) {
         ctx.textAlign = 'left';
-        ctx.font = `700 ${10 * s}px ${FONT_FAMILY.Inter}`;
-        const cat = item.category.toUpperCase();
+        ctx.font = `700 ${10 * s}px ${bodyFam}`;
+        const cat = (item.category || '').toUpperCase();
         const bw = ctx.measureText(cat).width + 18 * s;
         ctx.fillStyle = catColor + '33';
         roundRect(ctx, leftX, y, bw, 19 * s, 6 * s); ctx.fill();
@@ -763,8 +775,8 @@ function App() {
       }
       if (f.date) {
         ctx.textAlign = 'right';
-        ctx.font = `${10 * s}px ${FONT_FAMILY.Inter}`;
-        ctx.fillStyle = '#64748b';
+        ctx.font = `${10 * s}px ${bodyFam}`;
+        ctx.fillStyle = metaCol;
         ctx.fillText(item.date || '', rightX, y + 10 * s);
       }
       ctx.textBaseline = 'alphabetic';
@@ -782,7 +794,7 @@ function App() {
     if (bodyLines.length) {
       y += 8 * s;
       ctx.fillStyle = c.textColor;
-      ctx.font = `${c.textSize * s}px ${FONT_FAMILY.Inter}`;
+      ctx.font = `${c.textSize * s}px ${bodyFam}`;
       for (const ln of bodyLines) { ctx.fillText(ln, tx, y); y += bodyLH; }
     }
 
@@ -794,11 +806,11 @@ function App() {
       ctx.beginPath(); ctx.moveTo(leftX, fy - 16 * s); ctx.lineTo(rightX, fy - 16 * s); ctx.stroke();
       ctx.textBaseline = 'middle';
       if (f.nation) {
-        ctx.textAlign = 'left'; ctx.font = `${10 * s}px ${FONT_FAMILY.Inter}`; ctx.fillStyle = '#94a3b8';
+        ctx.textAlign = 'left'; ctx.font = `${10 * s}px ${bodyFam}`; ctx.fillStyle = metaCol;
         ctx.fillText('◉ ' + (item.nation || ''), leftX, fy);
       }
       if (f.source) {
-        ctx.textAlign = 'right'; ctx.font = `${10 * s}px ${FONT_FAMILY.Inter}`; ctx.fillStyle = '#64748b';
+        ctx.textAlign = 'right'; ctx.font = `${10 * s}px ${bodyFam}`; ctx.fillStyle = metaCol;
         ctx.fillText(item.source || '', rightX, fy);
       }
       ctx.textBaseline = 'alphabetic';
@@ -837,11 +849,11 @@ function App() {
 
   // Deterministic frame-by-frame export via WebCodecs.
   //
-  // SPEED STRATEGY: the globe always renders at its native 720×1280 resolution —
-  // resizing the WebGL renderer to 4K would be 9× slower. Instead, we create the
-  // composition canvas at the chosen export resolution and draw the (small) globe
-  // canvas scaled up via ctx.drawImage. Card text is drawn natively at export res,
-  // so it is always pixel-perfect regardless of scale.
+  // QUALITY/SPEED BALANCE: the globe is rendered at the export resolution but
+  // CAPPED at 1440×2560 — so 1080p tiers render the map natively (sharp, no
+  // upscale) while 4K renders at 1440p then upscales only 1.5× (still crisp, but
+  // ~4× cheaper than rendering the WebGL scene at full 4K). The card/text is always
+  // drawn natively on the composite canvas at full export resolution.
   const exportVideoHQ = async () => {
     const g = getGlobeCanvas();
     if (!g) { showToast('Globo non pronto', 'error'); return; }
@@ -850,9 +862,11 @@ function App() {
     const st = settingsRef.current;
     const tier = EXPORT_TIERS[st.exportTier] || EXPORT_TIERS.fast;
     const fps = tier.fps;
-    // Composition canvas: export resolution (globe upscaled via drawImage)
+    // Composition canvas: export resolution (globe drawn into it via drawImage)
     const W = tier.res, H = Math.round(tier.res * 16 / 9);
     const s = W / 360; // card drawing scale
+    // Globe render resolution: match export but cap at 1440p for speed
+    const gW = Math.min(W, 1440), gH = Math.round(gW * 16 / 9);
 
     const codecPref = ['avc', 'hevc', 'av1', 'vp9'];
     let codec = null;
@@ -881,6 +895,12 @@ function App() {
     const prevAuto = ctrl?.autoRotate;
     if (ctrl) { ctrl.autoRotate = false; ctrl.enabled = false; }
 
+    // Upscale the WebGL renderer to the (capped) globe render resolution.
+    const prevW = gInst.width(), prevH = gInst.height();
+    const prevPR = gInst.renderer().getPixelRatio();
+    gInst.renderer().setPixelRatio(1);
+    gInst.width(gW).height(gH);
+
     // Freeze auto-driven arc dash + polygon transitions; we drive them per-frame.
     const ARC_PERIOD = 1800;
     gInst.arcDashAnimateTime(0);
@@ -896,6 +916,7 @@ function App() {
     const cloudBase = cloud?.userData.baseOpacity ?? 0.25;
 
     const restore = () => {
+      gInst.width(prevW).height(prevH); gInst.renderer().setPixelRatio(prevPR);
       gInst.arcDashAnimateTime(ARC_PERIOD);
       gInst.polygonsTransitionDuration(400);
       if (cloud) cloud.material.opacity = cloudBase;
@@ -1075,7 +1096,7 @@ function App() {
   const slotStyle = card.position === 'top' ? { top: 30 } : card.position === 'center' ? { top: '50%', transform: 'translateY(-50%)' } : { bottom: 30 };
 
   return (
-    <div className="min-h-screen text-slate-200 flex flex-col" style={{ '--accent': accent }}>
+    <div className="h-screen overflow-hidden text-slate-200 flex flex-col" style={{ '--accent': accent }}>
       <nav className="border-b border-slate-800/80 bg-slate-950/70 backdrop-blur-xl z-50">
         <div className="max-w-[1480px] mx-auto px-6 h-14 flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -1104,11 +1125,11 @@ function App() {
                   <Reorder.Item key={item.id} value={item}
                     className={`group flex items-start gap-3 p-3 rounded-2xl cursor-grab active:cursor-grabbing border transition-colors ${index === currentIndex ? 'bg-slate-800 border-slate-600' : 'bg-slate-900 border-slate-800 hover:border-slate-700'}`}
                     whileDrag={{ scale: 1.02 }}>
-                    <div className="w-2.5 h-2.5 mt-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: getCategoryColor(item.category) }} />
+                    <div className="w-2.5 h-2.5 mt-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: resolveCatColor(item, accent) }} />
                     <div className="flex-1 min-w-0" onClick={() => selectNews(index)}>
                       <div className="font-medium text-[13px] leading-tight line-clamp-2">{item.title}</div>
                       <div className="flex items-center gap-2 mt-1.5">
-                        <span className="tag text-[9px] px-1.5 py-px" style={{ backgroundColor: getCategoryColor(item.category) + '22', color: getCategoryColor(item.category) }}>{item.category}</span>
+                        <span className="tag text-[9px] px-1.5 py-px" style={{ backgroundColor: resolveCatColor(item, accent) + '22', color: resolveCatColor(item, accent) }}>{item.category}</span>
                         <span className="text-[10px] text-slate-500 font-mono">{item.nation}</span>
                       </div>
                     </div>
@@ -1155,16 +1176,16 @@ function App() {
                   }}>
                   {currentNews.type !== 'info' && (card.fields.category || card.fields.date) && (
                     <div className="flex items-center justify-between" style={{ marginBottom: 8 }}>
-                      {card.fields.category ? <span className="tag" style={{ backgroundColor: getCategoryColor(currentNews.category) + '30', color: getCategoryColor(currentNews.category) }}>{currentNews.category.toUpperCase()}</span> : <span />}
-                      {card.fields.date && <span className="text-[10px] text-slate-500 font-mono">{currentNews.date}</span>}
+                      {card.fields.category ? <span className="tag" style={{ backgroundColor: resolveCatColor(currentNews, accent) + '30', color: resolveCatColor(currentNews, accent), fontFamily: FONT_FAMILY[card.bodyFont] || FONT_FAMILY.Inter }}>{(currentNews.category || '').toUpperCase()}</span> : <span />}
+                      {card.fields.date && <span className="text-[10px] font-mono" style={{ color: card.metaColor }}>{currentNews.date}</span>}
                     </div>
                   )}
                   <h3 style={{ color: card.titleColor, fontFamily: FONT_FAMILY[card.titleFont], fontSize: card.titleSize, fontWeight: 700 }}>{currentNews.title}</h3>
-                  {(currentNews.type === 'info' || card.fields.body) && <p style={{ color: card.textColor, fontSize: card.textSize }} className="line-clamp-4">{currentNews.text}</p>}
+                  {(currentNews.type === 'info' || card.fields.body) && <p style={{ color: card.textColor, fontSize: card.textSize, fontFamily: FONT_FAMILY[card.bodyFont] || FONT_FAMILY.Inter }} className="line-clamp-4">{currentNews.text}</p>}
                   {currentNews.type !== 'info' && (card.fields.nation || card.fields.source) && (
-                    <div className="flex items-center justify-between text-[10px] pt-2.5 border-t border-white/10">
-                      {card.fields.nation ? <span className="flex items-center gap-1 text-slate-400"><MapPin className="w-3 h-3" /> {currentNews.nation}</span> : <span />}
-                      {card.fields.source && <span className="font-mono text-slate-500">{currentNews.source}</span>}
+                    <div className="flex items-center justify-between text-[10px] pt-2.5 border-t border-white/10" style={{ fontFamily: FONT_FAMILY[card.bodyFont] || FONT_FAMILY.Inter }}>
+                      {card.fields.nation ? <span className="flex items-center gap-1" style={{ color: card.metaColor }}><MapPin className="w-3 h-3" /> {currentNews.nation}</span> : <span />}
+                      {card.fields.source && <span className="font-mono" style={{ color: card.metaColor }}>{currentNews.source}</span>}
                     </div>
                   )}
                 </motion.div>
@@ -1361,12 +1382,21 @@ function App() {
                       <option value="Inter">Inter — Neutro</option>
                     </select>
                   </div>
+                  <div>
+                    <div className="text-[11px] text-slate-400 mb-1.5">Font testo / meta</div>
+                    <select value={card.bodyFont || 'Inter'} onChange={(e) => setCard({ bodyFont: e.target.value })} className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-sm focus:outline-none">
+                      <option value="Inter">Inter — Neutro</option>
+                      <option value="Space Grotesk">Space Grotesk — Tech</option>
+                      <option value="Playfair Display">Playfair — Editoriale</option>
+                    </select>
+                  </div>
                   <Slider label="Dimensione titolo" value={card.titleSize} min={12} max={24} step={1} display={`${card.titleSize}px`} onChange={(v) => setCard({ titleSize: v })} />
                   <Slider label="Dimensione testo" value={Math.round(card.textSize)} min={10} max={18} step={1} display={`${Math.round(card.textSize)}px`} onChange={(v) => setCard({ textSize: v })} />
                 </div>
                 <div className="bg-slate-900 rounded-2xl p-4 space-y-3">
                   <ColorRow label="Colore titolo" value={card.titleColor} onChange={(v) => setCard({ titleColor: v })} />
                   <ColorRow label="Colore testo" value={card.textColor} onChange={(v) => setCard({ textColor: v })} />
+                  <ColorRow label="Colore meta (data/nazione/fonte)" value={card.metaColor || '#94a3b8'} onChange={(v) => setCard({ metaColor: v })} />
                   <ColorRow label="Colore sfondo" value={card.bgColor} onChange={(v) => setCard({ bgColor: v })} />
                   <ColorRow label="Colore bordo accento" value={card.accentColor} onChange={(v) => setCard({ accentColor: v })} />
                 </div>
@@ -1396,7 +1426,20 @@ function App() {
                 <Field label="Descrizione breve"><textarea value={formData.text} onChange={(e) => setFormData({ ...formData, text: e.target.value })} rows={3} placeholder="Riassunto conciso..." className="inp resize-y min-h-[72px]" /></Field>
                 {formData.type !== 'info' && <>
                 <div className="grid grid-cols-2 gap-4">
-                  <Field label="Categoria"><select value={formData.category} onChange={(e) => setFormData({ ...formData, category: e.target.value })} className="inp">{CATEGORY_OPTIONS.map(c => <option key={c} value={c}>{c}</option>)}</select></Field>
+                  <div>
+                    <label className="text-xs text-slate-400 block mb-1.5">Categoria</label>
+                    <div className="flex items-center gap-2">
+                      <input type="text" list="cat-list" value={formData.category}
+                        onChange={(e) => setFormData({ ...formData, category: e.target.value })}
+                        placeholder="Conflitto, Sport…" className="inp flex-1" />
+                      <datalist id="cat-list">{CATEGORY_OPTIONS.map(c => <option key={c} value={c} />)}</datalist>
+                      <input type="color"
+                        value={formData.categoryColor || CATEGORY_COLORS[formData.category] || accent}
+                        onChange={(e) => setFormData({ ...formData, categoryColor: e.target.value })}
+                        title="Colore categoria"
+                        className="w-9 h-9 rounded-lg bg-transparent border border-slate-700 p-0.5 flex-shrink-0" />
+                    </div>
+                  </div>
                   <Field label="Data"><input type="date" value={formData.date} onChange={(e) => setFormData({ ...formData, date: e.target.value })} className="inp" /></Field>
                 </div>
                 <div className="grid grid-cols-2 gap-4">
@@ -1534,7 +1577,7 @@ function Timeline({ news, currentIndex, settings, accent, onSelect, onReorder, o
           {news.map((item, index) => {
             const isInfo = item.type === 'info';
             const active = index === currentIndex;
-            const col = isInfo ? '#64748b' : getCategoryColor(item.category);
+            const col = isInfo ? '#64748b' : (item.categoryColor || getCategoryColor(item.category));
             return (
               <Reorder.Item key={item.id} value={item} whileDrag={{ scale: 1.04 }}
                 onClick={() => onSelect(index)}
