@@ -23,7 +23,7 @@ const TEXTURES = {
   'blue-marble': { label: 'Blue Marble', url: '/textures/earth-blue-marble.jpg' },
   'day': { label: 'Giorno', url: '/textures/earth-day.jpg' },
   'night': { label: 'Notte', url: '/textures/earth-night.jpg' },
-  'topology': { label: 'Rilievo', url: '/textures/earth-topology.png' },
+  'topology': { label: 'Rilievo 3D', url: '/textures/earth-blue-marble.jpg', bumpScale: 30 },
 };
 const BG_URL = '/textures/night-sky.png';
 const BUMP_URL = '/textures/earth-topology.png';
@@ -33,7 +33,7 @@ const VIBES = {
   warroom: { label: 'War Room', texture: 'night', accent: '#ff3b3b', grid: '#ff6b6b' },
   ocean: { label: 'Oceano', texture: 'blue-marble', accent: '#0ea5e9', grid: '#7dd3fc' },
   amber: { label: 'Notte', texture: 'night', accent: '#f59e0b', grid: '#fbbf24' },
-  relief: { label: 'Rilievo', texture: 'topology', accent: '#22d3ee', grid: '#67e8f9' },
+  relief: { label: 'Rilievo 3D', texture: 'topology', accent: '#22d3ee', grid: '#67e8f9' },
 };
 
 const FONT_FAMILY = {
@@ -46,7 +46,8 @@ const DEFAULT_THEME = {
   texture: 'night',
   accent: '#ff3b3b',
   atmosphere: 0.16,
-  planetTint: '#ffffff',
+  planetOverlayColor: '#000000',
+  planetOverlayOpacity: 0,
   planetEmissive: '#000000',
   planetEmissiveInt: 0,
   showGrid: true,
@@ -102,6 +103,14 @@ function pointInPoly(lng, lat, geometry) {
   });
 }
 const findCountry = (lat, lng) => COUNTRY_FEATURES.find(f => pointInPoly(lng, lat, f.geometry)) ?? null;
+// Memoize per unique lat/lng — point-in-polygon is expensive
+function findCountryCached(cacheRef, lat, lng) {
+  const key = `${lat}\x00${lng}`;
+  if (key in cacheRef.current) return cacheRef.current[key];
+  const result = findCountry(lat, lng);
+  cacheRef.current[key] = result;
+  return result;
+}
 
 // ---------- Custom graticule grid (color + opacity controllable) ----------
 function buildGraticule(color, opacity) {
@@ -189,6 +198,8 @@ function App() {
   const globeEl = useRef(null);
   const globeInstance = useRef(null);
   const gridRef = useRef(null);
+  const overlayRef = useRef(null);
+  const countryCache = useRef({});
 
   const pickingRef = useRef(false);
   const newsRef = useRef(news);
@@ -268,7 +279,7 @@ function App() {
       });
 
     globeInstance.current = globe;
-    try { globe.renderer().setPixelRatio(2); } catch { /* ignore */ }
+    try { globe.renderer().setPixelRatio(Math.min(window.devicePixelRatio, 2)); } catch { /* ignore */ }
     globe.controls().autoRotate = true;
     globe.controls().autoRotateSpeed = 0.35;
 
@@ -277,24 +288,42 @@ function App() {
     globe.scene().add(grid);
     gridRef.current = grid;
 
+    // Emissive glow (additive — can never blacken the planet)
     try {
       const mat = globe.globeMaterial();
-      if (mat) {
-        mat.color.set(th.planetTint || '#ffffff');
-        if (mat.emissive) { mat.emissive.set(th.planetEmissive || '#000000'); mat.emissiveIntensity = th.planetEmissiveInt ?? 0; }
-      }
+      if (mat?.emissive) { mat.emissive.set(th.planetEmissive || '#000000'); mat.emissiveIntensity = th.planetEmissiveInt ?? 0; }
+      if (mat) mat.bumpScale = TEXTURES[th.texture]?.bumpScale ?? 5;
     } catch { /* ignore */ }
+
+    // Color overlay sphere (semi-transparent, depthTest:false — never blackens)
+    const overlayGeo = new THREE.SphereGeometry(101, 32, 32);
+    const overlayMat = new THREE.MeshBasicMaterial({
+      color: new THREE.Color(th.planetOverlayColor || '#000000'),
+      transparent: true, opacity: th.planetOverlayOpacity ?? 0,
+      depthTest: false, depthWrite: false,
+    });
+    const overlayMesh = new THREE.Mesh(overlayGeo, overlayMat);
+    overlayMesh.renderOrder = 2;
+    globe.scene().add(overlayMesh);
+    overlayRef.current = overlayMesh;
 
     return () => {
       try { globe._destructor && globe._destructor(); } catch { /* ignore */ }
       if (globeEl.current) globeEl.current.innerHTML = '';
       globeInstance.current = null;
       gridRef.current = null;
+      overlayRef.current = null;
     };
   }, []);
 
-  // Texture
-  useEffect(() => { globeInstance.current?.globeImageUrl(TEXTURES[theme.texture].url); }, [theme.texture]);
+  // Texture + bumpScale
+  useEffect(() => {
+    const g = globeInstance.current;
+    if (!g) return;
+    const tex = TEXTURES[theme.texture];
+    g.globeImageUrl(tex.url);
+    try { const mat = g.globeMaterial(); if (mat) mat.bumpScale = tex.bumpScale ?? 5; } catch { /* ignore */ }
+  }, [theme.texture]);
   // Atmosphere / accent
   useEffect(() => { globeInstance.current?.atmosphereColor(theme.accent).atmosphereAltitude(theme.atmosphere); }, [theme.accent, theme.atmosphere]);
   // Grid look
@@ -338,7 +367,7 @@ function App() {
     const g = globeInstance.current;
     if (!g) return;
     const item = news[currentIndex];
-    const country = (theme.showBorder && item) ? findCountry(item.lat, item.lng) : null;
+    const country = (theme.showBorder && item) ? findCountryCached(countryCache, item.lat, item.lng) : null;
     if (country) {
       g.polygonsData([country]).polygonAltitude(0.006)
        .polygonCapColor(() => hexA(theme.borderColor, theme.borderOpacity * 0.28))
@@ -348,13 +377,18 @@ function App() {
     } else g.polygonsData([]);
   }, [news, currentIndex, theme.showBorder, theme.borderColor, theme.borderOpacity]);
 
-  // Planet color grading
+  // Planet emissive glow
   useEffect(() => {
     const mat = globeInstance.current?.globeMaterial();
-    if (!mat) return;
-    mat.color.set(theme.planetTint || '#ffffff');
-    if (mat.emissive) { mat.emissive.set(theme.planetEmissive || '#000000'); mat.emissiveIntensity = theme.planetEmissiveInt ?? 0; }
-  }, [theme.planetTint, theme.planetEmissive, theme.planetEmissiveInt]);
+    if (mat?.emissive) { mat.emissive.set(theme.planetEmissive || '#000000'); mat.emissiveIntensity = theme.planetEmissiveInt ?? 0; }
+  }, [theme.planetEmissive, theme.planetEmissiveInt]);
+  // Planet color overlay
+  useEffect(() => {
+    const overlay = overlayRef.current;
+    if (!overlay) return;
+    overlay.material.color.set(theme.planetOverlayColor || '#000000');
+    overlay.material.opacity = theme.planetOverlayOpacity ?? 0;
+  }, [theme.planetOverlayColor, theme.planetOverlayOpacity]);
 
   useEffect(() => () => { clearTimeout(playState.current.slideTimer); clearTimeout(playState.current.zoomTimer); }, []);
 
@@ -558,8 +592,8 @@ function App() {
     const ctx = comp.getContext('2d');
     let raf;
     const loop = () => { ctx.clearRect(0, 0, W, H); ctx.drawImage(g, 0, 0, W, H); drawCard(ctx, s, currentNewsRef.current); raf = requestAnimationFrame(loop); };
-    const stream = comp.captureStream(30);
-    const rec = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 8_000_000 });
+    const stream = comp.captureStream(60);
+    const rec = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 12_000_000 });
     const chunks = [];
     rec.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
     rec.onstop = () => {
@@ -764,7 +798,8 @@ function App() {
                 </div>
                 <div className="bg-slate-900 rounded-2xl p-4 space-y-4">
                   <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">Grading colore pianeta</div>
-                  <ColorRow label="Tinta (moltiplica texture)" value={theme.planetTint} onChange={(v) => setTheme(t => ({ ...t, planetTint: v }))} />
+                  <ColorRow label="Tinta overlay" value={theme.planetOverlayColor} onChange={(v) => setTheme(t => ({ ...t, planetOverlayColor: v }))} />
+                  <Slider label="Intensità tinta" value={Math.round((theme.planetOverlayOpacity || 0) * 100)} min={0} max={70} step={5} display={`${Math.round((theme.planetOverlayOpacity || 0) * 100)}%`} onChange={(v) => setTheme(t => ({ ...t, planetOverlayOpacity: v / 100 }))} />
                   <ColorRow label="Bagliore emissivo" value={theme.planetEmissive} onChange={(v) => setTheme(t => ({ ...t, planetEmissive: v }))} />
                   <Slider label="Intensità bagliore" value={Math.round((theme.planetEmissiveInt || 0) * 100)} min={0} max={80} step={5} display={`${Math.round((theme.planetEmissiveInt || 0) * 100)}%`} onChange={(v) => setTheme(t => ({ ...t, planetEmissiveInt: v / 100 }))} />
                 </div>
