@@ -1,57 +1,64 @@
-# 🌍 GeoReel Generator
+# GeoReel Generator
 
 **Single Page Application** per creare Reel/TikTok geopolitici con globo 3D realistico.
 
 - Globo 3D con texture NASA Blue Marble
-- Pin interattivi cliccabili
-- Card notizie animate
-- Esportazione video (WebM) e immagini
-- 100% client-side (nessun backend)
+- Pin interattivi cliccabili per categoria
+- Card notizie animate con font personalizzabile
+- Esportazione video (WebM via MediaRecorder) e immagini PNG
+- 100% client-side (nessun backend, nessun dato inviato)
 
-## 🚀 Deploy su Cloudflare Pages (5 minuti)
+## Deploy su Cloudflare Pages
 
-### Metodo più veloce (senza Git):
+### Metodo Direct Upload (senza Git)
 
-1. **Sul tuo computer** crea una cartella `georeel`
-2. Copia **tutti i file** di questo progetto dentro la cartella
-3. Apri il terminale nella cartella e esegui:
-   ```bash
-   npm install
-   npm run build
-   ```
-4. Vai su [Cloudflare Pages](https://pages.cloudflare.com)
-5. Clicca **"Create a project"** → **"Direct Upload"**
-6. Trascina la cartella **`dist`** che è stata creata
-7. Clicca **Deploy**
+```bash
+npm install
+npm run build
+```
 
-Fatto! Il tuo GeoReel sarà online in pochi secondi.
-
-### Metodo con GitHub (consigliato per aggiornamenti futuri):
-
-1. Crea un nuovo repository su GitHub
-2. Carica tutti i file di questo progetto
-3. Su Cloudflare Pages → **Connect to Git**
-4. Seleziona il repo → **Save and Deploy**
+Vai su [Cloudflare Pages](https://pages.cloudflare.com) → **Create a project** → **Direct Upload** → trascina la cartella **`dist`** → Deploy.
 
 ---
 
-## Comandi utili
+### Metodo GitHub (consigliato per aggiornamenti futuri)
 
-| Comando              | Descrizione                     |
-|----------------------|---------------------------------|
-| `npm run dev`        | Avvia in locale (http://localhost:5173) |
-| `npm run build`      | Crea la versione per deploy     |
-| `npm run preview`    | Anteprima della build           |
+1. Crea un repo GitHub e carica i file del progetto
+2. Su Cloudflare Pages → **Connect to Git** → seleziona il repo
+3. Nella schermata di configurazione build imposta:
+
+   | Campo | Valore |
+   |---|---|
+   | **Framework preset** | None |
+   | **Build command** | `npm run build` |
+   | **Build output directory** | `dist` |
+
+4. In **Environment variables** aggiungi:
+
+   | Variabile | Valore |
+   |---|---|
+   | `NODE_VERSION` | `18` |
+
+5. Clicca **Save and Deploy**
+
+> **Nota:** senza configurare il build command, Cloudflare serve i file sorgente `.jsx` direttamente, causando l'errore MIME type. La cartella `dist/` con i file compilati è quella corretta da servire.
+
+---
+
+## Sviluppo locale
+
+```bash
+npm install
+npm run dev       # http://localhost:5173
+npm run build     # build di produzione
+npm run preview   # anteprima della build
+```
 
 ## Stack
 
-- React 19 + Vite
-- globe.gl (Three.js)
-- Tailwind CSS
-- Framer Motion
-- ccapture.js + html2canvas
-
----
-
-**Creato con ❤️ da Grok**  
-Pronto per essere deployato su Cloudflare Pages in meno di 5 minuti.
+- React 19 + Vite 8
+- globe.gl + Three.js
+- Tailwind CSS 3
+- Framer Motion 11
+- html2canvas (export PNG)
+- MediaRecorder API (export WebM)
