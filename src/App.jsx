@@ -193,14 +193,30 @@ const driftPov = (base, holdMs, intensity) => {
 
 // Living clouds: rotate + gentle wobble + breathing opacity/scale (subtle 3D depth).
 // Deterministic from a time in ms so preview and export stay smooth.
-const animateCloud = (mesh, baseOpacity, speed, ms) => {
+// offsetLng (deg) shifts start position; tilt (deg) tilts the cloud axis.
+const animateCloud = (mesh, baseOpacity, speed, offsetLng, tilt, ms) => {
   if (!mesh) return;
-  mesh.rotation.y = ms * 0.0000075 * (speed ?? 0.5) * 12;
-  mesh.rotation.x = Math.sin(ms * 0.000045) * 0.025;
+  mesh.rotation.y = (offsetLng * Math.PI / 180) + ms * 0.0000075 * (speed ?? 0.5) * 12;
+  mesh.rotation.x = (tilt * Math.PI / 180) + Math.sin(ms * 0.000045) * 0.025;
   const pulse = 1 + Math.sin(ms * 0.00019) * 0.14;
   mesh.material.opacity = baseOpacity * pulse;
   const sc = 1 + Math.sin(ms * 0.00013) * 0.005;
   mesh.scale.setScalar(sc);
+};
+
+const CLOUD_PRESETS = {
+  light:  { label: 'Leggere', opacity: 0.11, bumpScale: 0.5 },
+  medium: { label: 'Medie',   opacity: 0.28, bumpScale: 1.4 },
+  heavy:  { label: 'Dense',   opacity: 0.52, bumpScale: 2.6 },
+};
+
+// Export quality tiers: resolution × fps.
+// Globe always renders at native 720×1280 (fast). Only the 2D composite canvas
+// changes size, so card text stays sharp at any resolution.
+const EXPORT_TIERS = {
+  fast: { label: 'Veloce 1080p·30fps', res: 1080, fps: 30 },
+  hd:   { label: 'HQ 1080p·60fps',    res: 1080, fps: 60 },
+  '4k': { label: '4K·30fps',          res: 2160, fps: 30 },
 };
 
 // Builds time→camera + time→active-card lookup. Mirrors live cinematicTo().
@@ -285,7 +301,7 @@ function App() {
   });
 
   const [settings, setSettings] = useState(() => {
-    const defaults = { holdMs: 3000, flyMs: 1200, altitude: 0.9, startLat: 20, startLng: 10, startAlt: 2.4, introMs: 800, outroType: 'hold', outroMs: 1500, autoSpin: true, driftIntensity: 0, showClouds: false, cloudOpacity: 0.25, cloudSpeed: 0.5 };
+    const defaults = { holdMs: 3000, flyMs: 1200, altitude: 0.9, startLat: 20, startLng: 10, startAlt: 2.4, introMs: 800, outroType: 'hold', outroMs: 1500, autoSpin: true, driftIntensity: 0, showClouds: false, cloudPreset: 'medium', cloudOpacity: 0.28, cloudSpeed: 0.5, cloudOffsetLng: 0, cloudTilt: 0, exportTier: 'fast' };
     try { const s = localStorage.getItem('georeel-settings-v1'); if (s) return { ...defaults, ...JSON.parse(s) }; } catch { /* ignore */ }
     return defaults;
   });
@@ -432,20 +448,20 @@ function App() {
     globe.scene().add(overlayMesh);
     overlayRef.current = overlayMesh;
 
-    // Cloud layer — sits a bit higher than the surface for parallax depth.
-    // bumpMap gives the clouds real 3D relief; animateCloud makes them live & breathe.
+    // Cloud layer — sits higher than the surface for parallax depth.
+    // bumpMap gives real 3D relief; animateCloud makes them live & breathe.
     const st0 = settingsRef.current;
+    const preset0 = CLOUD_PRESETS[st0.cloudPreset] || CLOUD_PRESETS.medium;
     const cloudTex = new THREE.TextureLoader().load('/textures/earth-clouds.png');
     const cloudGeo = new THREE.SphereGeometry(103, 64, 64);
     const cloudMat = new THREE.MeshPhongMaterial({
-      map: cloudTex, alphaMap: cloudTex, bumpMap: cloudTex, bumpScale: 1.4,
-      transparent: true, opacity: st0.cloudOpacity ?? 0.25,
-      depthWrite: false, shininess: 4,
+      map: cloudTex, alphaMap: cloudTex, bumpMap: cloudTex, bumpScale: preset0.bumpScale,
+      transparent: true, opacity: preset0.opacity, depthWrite: false, shininess: 4,
     });
     const cloudMesh = new THREE.Mesh(cloudGeo, cloudMat);
     cloudMesh.visible = !!(st0.showClouds);
     cloudMesh.renderOrder = 4;
-    cloudMesh.userData.baseOpacity = st0.cloudOpacity ?? 0.25;
+    cloudMesh.userData.baseOpacity = preset0.opacity;
     globe.scene().add(cloudMesh);
     cloudRef.current = cloudMesh;
 
@@ -454,7 +470,8 @@ function App() {
     const rotateCloud = () => {
       const m = cloudRef.current;
       if (m && m.visible && !exportingRef.current) {
-        animateCloud(m, m.userData.baseOpacity ?? 0.25, settingsRef.current.cloudSpeed ?? 0.5, nowMs());
+        const sr = settingsRef.current;
+        animateCloud(m, m.userData.baseOpacity, sr.cloudSpeed ?? 0.5, sr.cloudOffsetLng ?? 0, sr.cloudTilt ?? 0, nowMs());
       }
       cloudRafId = requestAnimationFrame(rotateCloud);
     };
@@ -554,14 +571,16 @@ function App() {
     overlay.material.color.set(theme.planetOverlayColor || '#000000');
     overlay.material.opacity = theme.planetOverlayOpacity ?? 0;
   }, [theme.planetOverlayColor, theme.planetOverlayOpacity]);
-  // Cloud layer
+  // Cloud layer — react to preset + visibility changes
   useEffect(() => {
     const cloud = cloudRef.current;
     if (!cloud) return;
     cloud.visible = !!settings.showClouds;
-    cloud.userData.baseOpacity = settings.cloudOpacity ?? 0.25;
-    cloud.material.opacity = settings.cloudOpacity ?? 0.25;
-  }, [settings.showClouds, settings.cloudOpacity]);
+    const preset = CLOUD_PRESETS[settings.cloudPreset] || CLOUD_PRESETS.medium;
+    cloud.userData.baseOpacity = preset.opacity;
+    cloud.material.opacity = preset.opacity;
+    cloud.material.bumpScale = preset.bumpScale;
+  }, [settings.showClouds, settings.cloudPreset]);
   // Preview satellite drift — slow orbit while the camera holds over a target
   useEffect(() => {
     if (!settings.driftIntensity || settings.driftIntensity <= 0) return;
@@ -816,31 +835,35 @@ function App() {
     g.renderer().render(g.scene(), cam);
   };
 
-  // Deterministic frame-by-frame export via WebCodecs (smooth, not a screen grab).
-  // Renders at the highest 9:16 resolution the encoder accepts (up to 4K = 2160×3840).
+  // Deterministic frame-by-frame export via WebCodecs.
+  //
+  // SPEED STRATEGY: the globe always renders at its native 720×1280 resolution —
+  // resizing the WebGL renderer to 4K would be 9× slower. Instead, we create the
+  // composition canvas at the chosen export resolution and draw the (small) globe
+  // canvas scaled up via ctx.drawImage. Card text is drawn natively at export res,
+  // so it is always pixel-perfect regardless of scale.
   const exportVideoHQ = async () => {
     const g = getGlobeCanvas();
     if (!g) { showToast('Globo non pronto', 'error'); return; }
     const clips = newsRef.current;
     if (!clips.length) { showToast('Aggiungi almeno una clip', 'error'); return; }
     const st = settingsRef.current;
-    const fps = 60;
+    const tier = EXPORT_TIERS[st.exportTier] || EXPORT_TIERS.fast;
+    const fps = tier.fps;
+    // Composition canvas: export resolution (globe upscaled via drawImage)
+    const W = tier.res, H = Math.round(tier.res * 16 / 9);
+    const s = W / 360; // card drawing scale
 
-    // Pick the highest 9:16 resolution the browser can actually encode.
     const codecPref = ['avc', 'hevc', 'av1', 'vp9'];
-    const RES_LADDER = [[2160, 3840], [1440, 2560], [1080, 1920], [720, 1280]];
-    let W = 0, H = 0, codec = null;
-    for (const [w, h] of RES_LADDER) {
-      let c = null;
-      try { c = await getFirstEncodableVideoCodec(codecPref, { width: w, height: h }); } catch { /* ignore */ }
-      if (c) { W = w; H = h; codec = c; break; }
-    }
+    let codec = null;
+    try { codec = await getFirstEncodableVideoCodec(codecPref, { width: W, height: H }); } catch { /* ignore */ }
     if (!codec) { showToast('WebCodecs non disponibile, uso cattura schermo', 'error'); return exportVideoCapture(); }
-    const s = W / 360;
     const isMp4 = codec === 'avc' || codec === 'hevc' || codec === 'av1';
     const ext = isMp4 ? 'mp4' : 'webm';
     const comp = document.createElement('canvas'); comp.width = W; comp.height = H;
     const ctx = comp.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
 
     const output = new Output({
       format: isMp4 ? new Mp4OutputFormat({ fastStart: 'in-memory' }) : new WebMOutputFormat(),
@@ -858,18 +881,12 @@ function App() {
     const prevAuto = ctrl?.autoRotate;
     if (ctrl) { ctrl.autoRotate = false; ctrl.enabled = false; }
 
-    // Upscale the renderer to the export resolution (pixelRatio 1 → exact buffer size).
-    const prevW = gInst.width(), prevH = gInst.height();
-    const prevPR = gInst.renderer().getPixelRatio();
-    gInst.renderer().setPixelRatio(1);
-    gInst.width(W).height(H);
-
-    // Freeze auto-driven arc dash + polygon transitions; we drive them per-frame instead.
-    const prevArcAnimTime = 1800;
+    // Freeze auto-driven arc dash + polygon transitions; we drive them per-frame.
+    const ARC_PERIOD = 1800;
     gInst.arcDashAnimateTime(0);
     gInst.polygonsTransitionDuration(0);
 
-    // Collect arc shader materials so we can advance the dash deterministically.
+    // Collect arc shader materials for deterministic dash advance.
     const arcMats = [];
     gInst.scene().traverse((o) => {
       const u = o.material && o.material.uniforms;
@@ -877,6 +894,15 @@ function App() {
     });
     const cloud = cloudRef.current;
     const cloudBase = cloud?.userData.baseOpacity ?? 0.25;
+
+    const restore = () => {
+      gInst.arcDashAnimateTime(ARC_PERIOD);
+      gInst.polygonsTransitionDuration(400);
+      if (cloud) cloud.material.opacity = cloudBase;
+      if (ctrl) { ctrl.autoRotate = prevAuto; ctrl.enabled = true; }
+      exportingRef.current = false;
+      setIsExporting(false); setExportPct(0);
+    };
 
     try {
       await output.start();
@@ -886,6 +912,9 @@ function App() {
       const transType = th.card.transitionType ?? 'slide';
       const frameDur = 1 / fps;
       let lastClipIdx = -1;
+      // Pipelined: kick off encoding for frame f while rendering frame f+1.
+      // source.add() captures the canvas synchronously (snapshot) then encodes async.
+      let pendingEncode = null;
 
       for (let f = 0; f < totalFrames; f++) {
         const tms = (f / fps) * 1000;
@@ -894,7 +923,7 @@ function App() {
         const item = clips[clip] || null;
         currentNewsRef.current = item;
 
-        // Update country border per-clip (deterministic, follows settings exactly)
+        // Country border: set once per clip change
         if (clip !== lastClipIdx) {
           lastClipIdx = clip;
           if (th.showBorder && item && hasGeo(item)) {
@@ -905,23 +934,22 @@ function App() {
                 .polygonCapColor(() => hexA(th.borderColor, th.borderOpacity * 0.28))
                 .polygonSideColor(() => 'rgba(0,0,0,0)')
                 .polygonStrokeColor(() => hexA(th.borderColor, th.borderOpacity));
-            } else {
-              gInst.polygonsData([]);
-            }
-          } else {
-            gInst.polygonsData([]);
-          }
+            } else { gInst.polygonsData([]); }
+          } else { gInst.polygonsData([]); }
         }
 
-        // Advance flowing arc dashes deterministically (no freeze, no jump)
-        const dashVal = tms / prevArcAnimTime;
+        // Deterministic arc dash advance (matches live speed: 1 unit / ARC_PERIOD ms)
+        const dashVal = tms / ARC_PERIOD;
         for (const m of arcMats) m.uniforms.dashTranslate.value = dashVal;
-        // Living clouds, deterministic per frame
-        if (cloud && cloud.visible) animateCloud(cloud, cloudBase, st.cloudSpeed ?? 0.5, tms);
+        // Living clouds, deterministic
+        if (cloud && cloud.visible) {
+          animateCloud(cloud, cloudBase, st.cloudSpeed ?? 0.5, st.cloudOffsetLng ?? 0, st.cloudTilt ?? 0, tms);
+        }
 
+        // Render globe at native resolution (fast), upscale via drawImage
         setCameraPOV(pov);
         ctx.clearRect(0, 0, W, H);
-        ctx.drawImage(g, 0, 0, W, H);
+        ctx.drawImage(g, 0, 0, W, H); // smooth upscale from 720p to export res
         const offsetY = transType === 'slide' ? (1 - alpha) * 28 * s : 0;
         const drawAlpha = transType === 'none' ? 1 : alpha;
         const scale = transType === 'zoom' ? 0.92 + 0.08 * alpha : 1;
@@ -935,34 +963,31 @@ function App() {
         }
         if (fadeBlack > 0) { ctx.fillStyle = `rgba(0,0,0,${fadeBlack})`; ctx.fillRect(0, 0, W, H); }
 
-        await source.add(f / fps, frameDur);
-        if (f % 4 === 0) setExportPct(Math.round((f / totalFrames) * 100));
+        // Pipeline: await previous encode, then kick off this frame's encode.
+        if (pendingEncode) await pendingEncode;
+        pendingEncode = source.add(f / fps, frameDur);
+
+        // Yield to the UI every 20 frames (progress bar + GC breathing room).
+        if (f % 20 === 0) {
+          setExportPct(Math.round((f / totalFrames) * 100));
+          await new Promise(r => setTimeout(r, 0));
+        }
       }
+      if (pendingEncode) await pendingEncode;
       await output.finalize();
+      const label = tier.res >= 2160 ? '4K' : `${tier.res}p`;
       const blob = new Blob([output.target.buffer], { type: isMp4 ? 'video/mp4' : 'video/webm' });
       const url = URL.createObjectURL(blob);
-      const a = document.createElement('a'); a.href = url; a.download = `GeoReel_${H >= 3840 ? '4K_' : ''}${new Date().toISOString().slice(0, 10)}.${ext}`; a.click();
+      const a = document.createElement('a'); a.href = url; a.download = `GeoReel_${label}_${new Date().toISOString().slice(0, 10)}.${ext}`; a.click();
       URL.revokeObjectURL(url);
-      showToast(`Video ${H}p esportato ✓`);
+      showToast(`Video ${label}@${fps}fps esportato ✓`);
     } catch (err) {
       console.error(err);
       showToast('Errore export, uso cattura schermo', 'error');
-      gInst.width(prevW).height(prevH); gInst.renderer().setPixelRatio(prevPR);
-      gInst.arcDashAnimateTime(prevArcAnimTime);
-      gInst.polygonsTransitionDuration(400);
-      if (ctrl) { ctrl.autoRotate = prevAuto; ctrl.enabled = true; }
-      exportingRef.current = false;
-      setIsExporting(false); setExportPct(0);
+      restore();
       return exportVideoCapture();
     }
-    // Restore preview resolution & live animation
-    gInst.width(prevW).height(prevH); gInst.renderer().setPixelRatio(prevPR);
-    gInst.arcDashAnimateTime(prevArcAnimTime);
-    gInst.polygonsTransitionDuration(400);
-    if (cloud) cloud.material.opacity = cloudBase;
-    if (ctrl) { ctrl.autoRotate = prevAuto; ctrl.enabled = true; }
-    exportingRef.current = false;
-    setIsExporting(false); setExportPct(0);
+    restore();
     stopPreview();
   };
 
@@ -1206,17 +1231,29 @@ function App() {
                 <Toggle wide active={theme.showCards} onClick={() => setTheme(t => ({ ...t, showCards: !t.showCards }))} icon={<Layers className="w-4 h-4" />} label={theme.showCards ? 'Card notizie: ON' : 'Solo punti (card OFF)'} accent={accent} />
                 <div className="space-y-4 bg-slate-900 rounded-2xl p-4">
                   <Toggle wide active={settings.showClouds} onClick={() => setSettings(s => ({ ...s, showClouds: !s.showClouds }))} icon={<Cloud className="w-4 h-4" />} label={settings.showClouds ? 'Nuvole: ON' : 'Nuvole: OFF'} accent={accent} />
-                  {settings.showClouds && <Slider label="Opacità nuvole" value={Math.round((settings.cloudOpacity ?? 0.25) * 100)} min={5} max={80} step={5} display={`${Math.round((settings.cloudOpacity ?? 0.25) * 100)}%`} onChange={(v) => setSettings(s => ({ ...s, cloudOpacity: v / 100 }))} />}
                   <Slider label="Drift satellite (fermo)" value={Math.round((settings.driftIntensity ?? 0) * 100)} min={0} max={100} step={5} display={settings.driftIntensity > 0 ? `${Math.round((settings.driftIntensity ?? 0) * 100)}%` : 'Off'} onChange={(v) => setSettings(s => ({ ...s, driftIntensity: v / 100 }))} />
                 </div>
                 <button onClick={resetCamera} className="w-full py-2.5 text-xs rounded-2xl border border-slate-800 hover:bg-slate-800 flex items-center justify-center gap-2"><RotateCcw className="w-3.5 h-3.5" /> RESET CAMERA</button>
                 <div>
                   <div className="uppercase tracking-wider text-[11px] font-semibold text-slate-400 mb-3">Esporta</div>
+                  {HQ_AVAILABLE && (
+                    <div className="mb-3">
+                      <div className="text-[10px] text-slate-500 mb-1.5">Qualità render</div>
+                      <div className="flex gap-1 bg-slate-800 rounded-xl p-1">
+                        {Object.entries(EXPORT_TIERS).map(([k, t]) => (
+                          <button key={k} onClick={() => setSettings(s => ({ ...s, exportTier: k }))}
+                            className={`flex-1 py-1.5 text-[10px] rounded-lg transition-colors leading-tight ${settings.exportTier === k ? 'bg-slate-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>
+                            {t.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   <div className="space-y-2">
-                    <button onClick={exportVideo} disabled={isExporting || news.length === 0} className="w-full flex items-center justify-center gap-2 py-3.5 rounded-2xl bg-white text-black font-semibold text-sm disabled:bg-slate-700 disabled:text-slate-400">{isExporting ? <>⏳ RENDERING…</> : <><Download className="w-4 h-4" /> {HQ_AVAILABLE ? 'VIDEO 4K (MP4)' : `VIDEO (${VIDEO_EXT})`}</>}</button>
+                    <button onClick={exportVideo} disabled={isExporting || news.length === 0} className="w-full flex items-center justify-center gap-2 py-3.5 rounded-2xl bg-white text-black font-semibold text-sm disabled:bg-slate-700 disabled:text-slate-400">{isExporting ? <>⏳ RENDERING…</> : <><Download className="w-4 h-4" /> {HQ_AVAILABLE ? `ESPORTA ${(EXPORT_TIERS[settings.exportTier] || EXPORT_TIERS.fast).label}` : `VIDEO (${VIDEO_EXT})`}</>}</button>
                     <button onClick={exportPNG} disabled={!currentNews} className="w-full flex items-center justify-center gap-2 py-3 text-sm rounded-2xl border border-slate-800 hover:bg-slate-800 disabled:opacity-40"><ImageIcon className="w-4 h-4" /> COVER PNG</button>
                   </div>
-                  <div className="mt-3 text-[10px] leading-snug text-slate-600">{HQ_AVAILABLE ? 'Render frame-by-frame fino a 4K (2160×3840) — fluido, non è una cattura schermo.' : 'WEBM via cattura schermo — converti su CloudConvert se serve.'}</div>
+                  <div className="mt-3 text-[10px] leading-snug text-slate-600">{HQ_AVAILABLE ? 'Render frame-by-frame, globe nativo + card in HD — fluido, non è una cattura schermo.' : 'WEBM via cattura schermo — converti su CloudConvert se serve.'}</div>
                 </div>
               </>
             )}
@@ -1267,6 +1304,28 @@ function App() {
                   </>}
                 </div>
                 <Toggle wide active={theme.showRoutes} onClick={() => setTheme(t => ({ ...t, showRoutes: !t.showRoutes }))} icon={<Route className="w-3.5 h-3.5" />} label="Rotte tra le notizie" accent={accent} />
+                <div className="bg-slate-900 rounded-2xl p-4 space-y-3">
+                  <Toggle wide active={settings.showClouds} onClick={() => setSettings(s => ({ ...s, showClouds: !s.showClouds }))} icon={<Cloud className="w-3.5 h-3.5" />} label="Nuvole" accent={accent} />
+                  {settings.showClouds && (
+                    <>
+                      <div>
+                        <div className="text-[10px] text-slate-500 mb-1.5">Stile nuvole</div>
+                        <div className="flex gap-1.5">
+                          {Object.entries(CLOUD_PRESETS).map(([k, p]) => (
+                            <button key={k} onClick={() => setSettings(s => ({ ...s, cloudPreset: k }))}
+                              className={`flex-1 py-2 rounded-xl text-[11px] border transition-all ${settings.cloudPreset === k ? '' : 'border-slate-700 text-slate-400 hover:border-slate-600'}`}
+                              style={settings.cloudPreset === k ? { borderColor: accent, background: accent + '1a', color: accent } : {}}>
+                              {p.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      <Slider label="Velocità rotazione" value={Math.round((settings.cloudSpeed ?? 0.5) * 100)} min={0} max={200} step={10} display={`${Math.round((settings.cloudSpeed ?? 0.5) * 100)}%`} onChange={(v) => setSettings(s => ({ ...s, cloudSpeed: v / 100 }))} />
+                      <Slider label="Orientamento iniziale" value={Math.round(settings.cloudOffsetLng ?? 0)} min={0} max={360} step={5} display={`${Math.round(settings.cloudOffsetLng ?? 0)}°`} onChange={(v) => setSettings(s => ({ ...s, cloudOffsetLng: v }))} />
+                      <Slider label="Inclinazione asse" value={Math.round(settings.cloudTilt ?? 0)} min={-25} max={25} step={1} display={`${Math.round(settings.cloudTilt ?? 0)}°`} onChange={(v) => setSettings(s => ({ ...s, cloudTilt: v }))} />
+                    </>
+                  )}
+                </div>
               </>
             )}
 
