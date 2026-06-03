@@ -1,11 +1,10 @@
 import React, { useState, useRef, useEffect } from 'react';
 import Globe from 'globe.gl';
 import html2canvas from 'html2canvas';
-import CCapture from 'ccapture.js';
 import { motion, Reorder } from 'framer-motion';
-import { 
-  Play, Pause, Download, Image as ImageIcon, Plus, Trash2, Edit2, 
-  MapPin, RotateCcw, Settings 
+import {
+  Play, Pause, Download, Image as ImageIcon, Plus, Trash2, Edit2,
+  MapPin, RotateCcw, Settings
 } from 'lucide-react';
 
 const CATEGORY_COLORS = {
@@ -66,13 +65,21 @@ const SAMPLE_NEWS = [
 ];
 
 function App() {
-  const [news, setNews] = useState(SAMPLE_NEWS);
+  const [news, setNews] = useState(() => {
+    try {
+      const saved = localStorage.getItem('georeel-news');
+      return saved ? JSON.parse(saved) : SAMPLE_NEWS;
+    } catch {
+      return SAMPLE_NEWS;
+    }
+  });
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [showModal, setShowModal] = useState(false);
   const [editingNews, setEditingNews] = useState(null);
-  const [isPickingLocation, setIsPickingLocation] = useState(false);
+  // Renamed to avoid conflict with wrapper below
+  const [isPickingLocation, _setIsPickingLocation] = useState(false);
   const [formData, setFormData] = useState({
     title: '', text: '', category: 'Conflitto', date: '', source: '', nation: '', lat: 40.7128, lng: -74.0060
   });
@@ -86,10 +93,40 @@ function App() {
     titleFont: 'Playfair Display'
   });
 
+  const [toast, setToast] = useState(null);
+  const [confirmDialog, setConfirmDialog] = useState(null);
+  const [formError, setFormError] = useState('');
+
   const globeEl = useRef(null);
   const globeInstance = useRef(null);
   const phoneRef = useRef(null);
   const intervalRef = useRef(null);
+  // Refs for values used inside stale closures (globe init useEffect with [] deps)
+  const isPickingLocationRef = useRef(false);
+  const newsRef = useRef(news);
+
+  // Keep newsRef current so the globe click handler always sees the latest list
+  useEffect(() => { newsRef.current = news; }, [news]);
+
+  // Wrapper that keeps both state and ref in sync
+  const setIsPickingLocation = (val) => {
+    isPickingLocationRef.current = val;
+    _setIsPickingLocation(val);
+  };
+
+  const showToast = (message, type = 'success') => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 2100);
+  };
+
+  const showConfirm = (message, onConfirm) => {
+    setConfirmDialog({ message, onConfirm });
+  };
+
+  // Persist news to localStorage whenever it changes
+  useEffect(() => {
+    try { localStorage.setItem('georeel-news', JSON.stringify(news)); } catch {}
+  }, [news]);
 
   // Initialize Globe
   useEffect(() => {
@@ -111,38 +148,30 @@ function App() {
       .pointRadius(0.55)
       .pointsTransitionDuration(400)
       .onGlobeClick((lat, lng) => {
-        if (isPickingLocation) {
+        // Use ref instead of captured state to avoid stale closure
+        if (isPickingLocationRef.current) {
           const roundedLat = parseFloat(lat.toFixed(4));
           const roundedLng = parseFloat(lng.toFixed(4));
-          
-          setFormData(prev => ({
-            ...prev,
-            lat: roundedLat,
-            lng: roundedLng
-          }));
-          
-          setIsPickingLocation(false);
-          
-          const toast = document.createElement('div');
-          toast.className = 'fixed bottom-8 left-1/2 -translate-x-1/2 bg-emerald-600 text-white px-6 py-2 rounded-full text-sm flex items-center gap-2 z-[100]';
-          toast.innerHTML = `📍 Posizione impostata: ${roundedLat}°, ${roundedLng}°`;
-          document.body.appendChild(toast);
-          
-          setTimeout(() => {
-            toast.style.transition = 'opacity 0.3s';
-            toast.style.opacity = '0';
-            setTimeout(() => document.body.removeChild(toast), 300);
-          }, 1800);
+
+          setFormData(prev => ({ ...prev, lat: roundedLat, lng: roundedLng }));
+
+          // Update both ref and state directly (wrappers not available in stale closure)
+          isPickingLocationRef.current = false;
+          _setIsPickingLocation(false);
+
+          setToast({ message: `📍 Posizione impostata: ${roundedLat}°, ${roundedLng}°`, type: 'success' });
+          setTimeout(() => setToast(null), 2100);
         }
       })
       .onPointClick((point) => {
-        const foundIndex = news.findIndex(n => n.id === point.id);
+        // Use newsRef so this always finds the correct index even after news changes
+        const foundIndex = newsRef.current.findIndex(n => n.id === point.id);
         if (foundIndex !== -1) {
           setCurrentIndex(foundIndex);
-          globe.pointOfView({ 
-            lat: point.lat, 
-            lng: point.lng, 
-            altitude: 0.85 
+          globe.pointOfView({
+            lat: point.lat,
+            lng: point.lng,
+            altitude: 0.85
           }, 900);
         }
       });
@@ -192,6 +221,7 @@ function App() {
 
   const openAddModal = () => {
     setEditingNews(null);
+    setFormError('');
     setFormData({
       title: '',
       text: '',
@@ -208,6 +238,7 @@ function App() {
 
   const openEditModal = (item) => {
     setEditingNews(item);
+    setFormError('');
     setFormData({ ...item });
     setShowModal(true);
     setIsPickingLocation(false);
@@ -215,14 +246,17 @@ function App() {
 
   const closeModal = () => {
     setShowModal(false);
+    setFormError('');
     setIsPickingLocation(false);
   };
 
   const saveNews = () => {
     if (!formData.title.trim() || !formData.text.trim()) {
-      alert("Titolo e descrizione sono obbligatori");
+      setFormError("Titolo e descrizione sono obbligatori");
       return;
     }
+
+    setFormError('');
 
     const newItem = {
       ...formData,
@@ -241,13 +275,14 @@ function App() {
   };
 
   const deleteNews = (id) => {
-    if (!confirm("Eliminare questa notizia?")) return;
-    setNews(prev => {
-      const filtered = prev.filter(n => n.id !== id);
-      if (currentIndex >= filtered.length) {
-        setCurrentIndex(Math.max(0, filtered.length - 1));
-      }
-      return filtered;
+    showConfirm("Eliminare questa notizia?", () => {
+      setNews(prev => {
+        const filtered = prev.filter(n => n.id !== id);
+        if (currentIndex >= filtered.length) {
+          setCurrentIndex(Math.max(0, filtered.length - 1));
+        }
+        return filtered;
+      });
     });
   };
 
@@ -255,10 +290,10 @@ function App() {
     setCurrentIndex(index);
     const item = news[index];
     if (globeInstance.current && item) {
-      globeInstance.current.pointOfView({ 
-        lat: item.lat, 
-        lng: item.lng, 
-        altitude: 0.82 
+      globeInstance.current.pointOfView({
+        lat: item.lat,
+        lng: item.lng,
+        altitude: 0.82
       }, 1100);
     }
   };
@@ -275,7 +310,7 @@ function App() {
       }
     } else {
       if (news.length === 0) {
-        alert("Aggiungi almeno una notizia per avviare l'anteprima!");
+        showToast("Aggiungi almeno una notizia per avviare l'anteprima!", 'error');
         return;
       }
       startPreviewSequence();
@@ -290,10 +325,10 @@ function App() {
     globeInstance.current.controls().autoRotate = false;
 
     const firstNews = news[0];
-    globeInstance.current.pointOfView({ 
-      lat: firstNews.lat, 
-      lng: firstNews.lng, 
-      altitude: 0.78 
+    globeInstance.current.pointOfView({
+      lat: firstNews.lat,
+      lng: firstNews.lng,
+      altitude: 0.78
     }, 700);
 
     let idx = 0;
@@ -304,10 +339,10 @@ function App() {
 
       const currentNewsItem = news[idx];
       if (globeInstance.current && currentNewsItem) {
-        globeInstance.current.pointOfView({ 
-          lat: currentNewsItem.lat, 
-          lng: currentNewsItem.lng, 
-          altitude: 0.78 
+        globeInstance.current.pointOfView({
+          lat: currentNewsItem.lat,
+          lng: currentNewsItem.lng,
+          altitude: 0.78
         }, 1050);
       }
     }, 3600);
@@ -324,59 +359,65 @@ function App() {
 
   const generateVideo = () => {
     if (!globeInstance.current || news.length === 0) {
-      alert("Aggiungi notizie prima di generare il video!");
+      showToast("Aggiungi notizie prima di generare il video!", 'error');
       return;
     }
 
     const canvas = globeEl.current?.querySelector('canvas');
-    if (!canvas) {
-      alert("Impossibile trovare il canvas del globo");
+    if (!canvas || !canvas.captureStream) {
+      showToast("Questo browser non supporta la cattura video dal canvas", 'error');
+      return;
+    }
+
+    const mimeType = MediaRecorder.isTypeSupported('video/webm; codecs=vp9')
+      ? 'video/webm; codecs=vp9'
+      : MediaRecorder.isTypeSupported('video/webm')
+      ? 'video/webm'
+      : null;
+
+    if (!mimeType) {
+      showToast("Formato video non supportato da questo browser", 'error');
       return;
     }
 
     setIsExporting(true);
-
-    const capturer = new CCapture({
-      format: 'webm',
-      framerate: 30,
-      verbose: false,
-      quality: 0.9,
-      name: 'GeoReel'
-    });
-
-    capturer.start();
-
     startPreviewSequence();
 
-    const totalDuration = (news.length * 3600) + 2200;
+    const stream = canvas.captureStream(30);
+    const recorder = new MediaRecorder(stream, { mimeType });
+    const chunks = [];
 
-    setTimeout(() => {
-      capturer.stop();
-      capturer.save((blob) => {
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `GeoReel_${new Date().toISOString().slice(0,10)}.webm`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
+    recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+    recorder.onstop = () => {
+      const blob = new Blob(chunks, { type: 'video/webm' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `GeoReel_${new Date().toISOString().slice(0,10)}.webm`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
 
-        setIsExporting(false);
-        if (intervalRef.current) {
-          clearInterval(intervalRef.current);
-          intervalRef.current = null;
+      setIsExporting(false);
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+      setIsPlaying(false);
+
+      setTimeout(() => {
+        if (globeInstance.current) {
+          globeInstance.current.pointOfView({ lat: 25, lng: 10, altitude: 2.0 }, 800);
+          globeInstance.current.controls().autoRotate = true;
         }
-        setIsPlaying(false);
-        
-        setTimeout(() => {
-          if (globeInstance.current) {
-            globeInstance.current.pointOfView({ lat: 25, lng: 10, altitude: 2.0 }, 800);
-            globeInstance.current.controls().autoRotate = true;
-          }
-        }, 600);
-      });
-    }, totalDuration);
+      }, 600);
+    };
+
+    recorder.start();
+
+    const totalDuration = (news.length * 3600) + 2200;
+    setTimeout(() => recorder.stop(), totalDuration);
   };
 
   const downloadCurrentFrame = async () => {
@@ -394,19 +435,19 @@ function App() {
       link.href = canvas.toDataURL('image/png', 0.95);
       link.click();
     } catch (err) {
-      alert("Errore durante l'esportazione dell'immagine");
+      showToast("Errore durante l'esportazione dell'immagine", 'error');
       console.error(err);
     }
   };
 
   const loadSampleData = () => {
-    if (confirm("Caricare i dati di esempio? (sostituirà le notizie attuali)")) {
+    showConfirm("Caricare i dati di esempio? (sostituirà le notizie attuali)", () => {
       setNews(SAMPLE_NEWS);
       setCurrentIndex(0);
       if (globeInstance.current) {
         globeInstance.current.pointOfView({ lat: 25, lng: 10, altitude: 2.1 }, 900);
       }
-    }
+    });
   };
 
   const currentNews = news[currentIndex] || null;
@@ -430,24 +471,24 @@ function App() {
           </div>
 
           <div className="flex items-center gap-4 text-sm">
-            <button 
+            <button
               onClick={loadSampleData}
               className="flex items-center gap-2 px-4 py-2 rounded-2xl bg-slate-800 hover:bg-slate-700 transition-colors text-sm"
             >
               <RotateCcw className="w-4 h-4" /> Carica Esempi
             </button>
-            <a href="https://github.com" target="_blank" className="text-slate-400 hover:text-white transition-colors">GitHub</a>
+            <a href="https://github.com/alfierocivita/georeel" target="_blank" rel="noreferrer" className="text-slate-400 hover:text-white transition-colors">GitHub</a>
           </div>
         </div>
       </nav>
 
       <div className="flex flex-1 overflow-hidden max-w-[1480px] mx-auto w-full">
-        
+
         {/* LEFT SIDEBAR - Controls */}
         <div className="w-80 border-r border-slate-800 bg-slate-950 flex flex-col">
           <div className="p-6 flex-1 overflow-auto">
             {/* Add News Button */}
-            <button 
+            <button
               onClick={openAddModal}
               className="w-full flex items-center justify-center gap-3 bg-white text-slate-950 hover:bg-slate-100 active:bg-white transition-all font-semibold py-3.5 rounded-3xl text-sm mb-8 shadow-xl shadow-black/50"
             >
@@ -467,34 +508,34 @@ function App() {
                   Nessuna notizia.<br />Aggiungine una per iniziare.
                 </div>
               ) : (
-                <Reorder.Group 
-                  axis="y" 
-                  values={news} 
+                <Reorder.Group
+                  axis="y"
+                  values={news}
                   onReorder={setNews}
                   className="space-y-2"
                 >
                   {news.map((item, index) => (
-                    <Reorder.Item 
-                      key={item.id} 
+                    <Reorder.Item
+                      key={item.id}
                       value={item}
                       className={`group flex items-start gap-3 p-4 rounded-3xl cursor-grab active:cursor-grabbing transition-all border ${
-                        index === currentIndex 
-                          ? 'bg-slate-800 border-sky-500/50' 
+                        index === currentIndex
+                          ? 'bg-slate-800 border-sky-500/50'
                           : 'bg-slate-900 border-slate-800 hover:border-slate-700'
                       }`}
                       whileDrag={{ scale: 1.01, boxShadow: "0 10px 30px -15px rgb(15 23 42)" }}
                     >
-                      <div 
+                      <div
                         className="w-3 h-3 mt-1.5 rounded-full flex-shrink-0 ring-2 ring-offset-2 ring-offset-slate-950"
                         style={{ backgroundColor: getCategoryColor(item.category), ringColor: getCategoryColor(item.category) + '40' }}
                       />
-                      
+
                       <div className="flex-1 min-w-0" onClick={() => selectNews(index)}>
                         <div className="font-semibold text-sm leading-tight line-clamp-2 pr-2">{item.title}</div>
                         <div className="flex items-center gap-2 mt-2">
-                          <span 
+                          <span
                             className="tag text-[9px] px-2 py-px font-mono"
-                            style={{ 
+                            style={{
                               backgroundColor: getCategoryColor(item.category) + '22',
                               color: getCategoryColor(item.category)
                             }}
@@ -506,13 +547,13 @@ function App() {
                       </div>
 
                       <div className="flex flex-col gap-1 opacity-60 group-hover:opacity-100 transition-opacity">
-                        <button 
+                        <button
                           onClick={(e) => { e.stopPropagation(); openEditModal(item); }}
                           className="p-1.5 hover:bg-slate-700 rounded-xl"
                         >
                           <Edit2 className="w-3.5 h-3.5" />
                         </button>
-                        <button 
+                        <button
                           onClick={(e) => { e.stopPropagation(); deleteNews(item.id); }}
                           className="p-1.5 hover:bg-red-950 text-red-400 hover:text-red-500 rounded-xl"
                         >
@@ -536,7 +577,7 @@ function App() {
                 {/* Font Selection */}
                 <div>
                   <div className="text-xs text-slate-400 mb-2">FONT TITOLO</div>
-                  <select 
+                  <select
                     value={theme.titleFont}
                     onChange={(e) => setTheme(prev => ({ ...prev, titleFont: e.target.value }))}
                     className="w-full bg-slate-800 border border-slate-700 rounded-2xl px-4 py-2.5 text-sm focus:outline-none focus:border-sky-500"
@@ -552,9 +593,9 @@ function App() {
                   <div>
                     <div className="text-xs text-slate-400 mb-2">COLORE CARD</div>
                     <div className="flex items-center gap-3">
-                      <input 
-                        type="color" 
-                        value={theme.cardBg} 
+                      <input
+                        type="color"
+                        value={theme.cardBg}
                         onChange={(e) => setTheme(prev => ({ ...prev, cardBg: e.target.value }))}
                         className="w-9 h-9 rounded-2xl overflow-hidden border border-slate-700 p-0.5 bg-transparent"
                       />
@@ -564,9 +605,9 @@ function App() {
                   <div>
                     <div className="text-xs text-slate-400 mb-2">ACCENTO / PIN</div>
                     <div className="flex items-center gap-3">
-                      <input 
-                        type="color" 
-                        value={theme.accentColor} 
+                      <input
+                        type="color"
+                        value={theme.accentColor}
                         onChange={(e) => setTheme(prev => ({ ...prev, accentColor: e.target.value }))}
                         className="w-9 h-9 rounded-2xl overflow-hidden border border-slate-700 p-0.5 bg-transparent"
                       />
@@ -583,8 +624,8 @@ function App() {
                       <button
                         key={style}
                         onClick={() => setTheme(prev => ({ ...prev, pinStyle: style }))}
-                        className={`flex-1 py-2 text-xs rounded-2xl border transition-all ${theme.pinStyle === style 
-                          ? 'border-sky-500 bg-sky-500/10 text-sky-400' 
+                        className={`flex-1 py-2 text-xs rounded-2xl border transition-all ${theme.pinStyle === style
+                          ? 'border-sky-500 bg-sky-500/10 text-sky-400'
                           : 'border-slate-700 hover:border-slate-600'}`}
                       >
                         {style === 'dot' && '● Punto'}
@@ -630,22 +671,22 @@ function App() {
 
               {/* Current News Card Overlay */}
               {currentNews && (
-                <motion.div 
+                <motion.div
                   key={currentNews.id}
                   initial={{ opacity: 0, y: 30, scale: 0.96 }}
                   animate={{ opacity: 1, y: 0, scale: 1 }}
                   transition={{ duration: 0.35, ease: [0.23, 1, 0.32, 1] }}
                   className="news-card"
-                  style={{ 
+                  style={{
                     backgroundColor: theme.cardBg,
-                    '--accent': theme.accentColor 
+                    '--accent': theme.accentColor
                   }}
                 >
                   <div className="flex items-start justify-between mb-3">
                     <div>
-                      <span 
+                      <span
                         className="tag"
-                        style={{ 
+                        style={{
                           backgroundColor: getCategoryColor(currentNews.category) + '30',
                           color: getCategoryColor(currentNews.category)
                         }}
@@ -656,11 +697,11 @@ function App() {
                     <div className="text-[10px] text-slate-500 font-mono tabular-nums">{currentNews.date}</div>
                   </div>
 
-                  <h3 
+                  <h3
                     className="leading-snug tracking-[-0.2px]"
-                    style={{ 
+                    style={{
                       color: theme.titleColor,
-                      fontFamily: theme.titleFont === 'Playfair Display' ? "'Playfair Display', Georgia, serif" : 
+                      fontFamily: theme.titleFont === 'Playfair Display' ? "'Playfair Display', Georgia, serif" :
                                   theme.titleFont === 'Space Grotesk' ? "'Space Grotesk', system-ui, sans-serif" : 'Inter, system-ui, sans-serif',
                       fontWeight: theme.titleFont === 'Playfair Display' ? 700 : 600
                     }}
@@ -705,8 +746,8 @@ function App() {
             {/* Play Controls */}
             <div className="bg-slate-900 rounded-3xl p-5 mb-6">
               <div className="text-xs text-slate-400 mb-4">SEQUENZA REEL</div>
-              
-              <button 
+
+              <button
                 onClick={togglePlay}
                 disabled={news.length === 0}
                 className="w-full flex items-center justify-center gap-3 py-4 rounded-3xl bg-gradient-to-r from-sky-500 to-indigo-600 hover:brightness-110 active:scale-[0.985] disabled:from-slate-700 disabled:to-slate-700 transition-all text-sm font-semibold shadow-xl disabled:shadow-none"
@@ -719,19 +760,19 @@ function App() {
               </button>
 
               <div className="flex gap-2 mt-3">
-                <button 
+                <button
                   onClick={resetCamera}
                   className="flex-1 py-3 text-xs rounded-3xl border border-slate-700 hover:bg-slate-800 flex items-center justify-center gap-2"
                 >
                   <RotateCcw className="w-3.5 h-3.5" /> RESET CAMERA
                 </button>
-                <button 
+                <button
                   onClick={() => {
                     if (currentNews && globeInstance.current) {
-                      globeInstance.current.pointOfView({ 
-                        lat: currentNews.lat, 
-                        lng: currentNews.lng, 
-                        altitude: 0.65 
+                      globeInstance.current.pointOfView({
+                        lat: currentNews.lat,
+                        lng: currentNews.lng,
+                        altitude: 0.65
                       }, 700);
                     }
                   }}
@@ -746,9 +787,9 @@ function App() {
             {/* Export Section */}
             <div className="mt-auto">
               <div className="uppercase tracking-[1.5px] text-xs font-semibold text-slate-400 mb-3 px-1">ESPORTA</div>
-              
+
               <div className="space-y-3">
-                <button 
+                <button
                   onClick={generateVideo}
                   disabled={isExporting || news.length === 0}
                   className="w-full flex items-center justify-center gap-3 py-4 rounded-3xl bg-white text-slate-950 font-semibold text-sm disabled:bg-slate-700 disabled:text-slate-400 hover:bg-slate-100 active:bg-white transition-all"
@@ -760,7 +801,7 @@ function App() {
                   )}
                 </button>
 
-                <button 
+                <button
                   onClick={downloadCurrentFrame}
                   disabled={!currentNews}
                   className="w-full flex items-center justify-center gap-3 py-3.5 text-sm rounded-3xl border border-slate-700 hover:bg-slate-800 disabled:opacity-40 transition-all"
@@ -786,7 +827,7 @@ function App() {
       {/* Add/Edit Modal */}
       {showModal && (
         <div className="fixed inset-0 bg-black/90 z-[100] flex items-center justify-center p-6" onClick={closeModal}>
-          <motion.div 
+          <motion.div
             initial={{ opacity: 0, scale: 0.96, y: 20 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
             className="modal w-full max-w-lg bg-slate-900 rounded-3xl overflow-hidden border border-slate-700"
@@ -803,11 +844,18 @@ function App() {
                 <button onClick={closeModal} className="text-slate-400 hover:text-white">✕</button>
               </div>
 
+              {/* Form validation error */}
+              {formError && (
+                <div className="mb-5 px-4 py-3 rounded-2xl bg-red-950/60 border border-red-800/50 text-red-400 text-sm">
+                  {formError}
+                </div>
+              )}
+
               <div className="space-y-5">
                 <div>
                   <label className="text-xs text-slate-400 block mb-1.5">TITOLO DELLA NOTIZIA</label>
-                  <input 
-                    type="text" 
+                  <input
+                    type="text"
                     value={formData.title}
                     onChange={(e) => setFormData({...formData, title: e.target.value})}
                     placeholder="Es: Nuovo accordo commerciale tra UE e ASEAN"
@@ -817,7 +865,7 @@ function App() {
 
                 <div>
                   <label className="text-xs text-slate-400 block mb-1.5">DESCRIZIONE BREVE (max 3 righe)</label>
-                  <textarea 
+                  <textarea
                     value={formData.text}
                     onChange={(e) => setFormData({...formData, text: e.target.value})}
                     rows={3}
@@ -829,7 +877,7 @@ function App() {
                 <div className="grid grid-cols-2 gap-5">
                   <div>
                     <label className="text-xs text-slate-400 block mb-1.5">CATEGORIA</label>
-                    <select 
+                    <select
                       value={formData.category}
                       onChange={(e) => setFormData({...formData, category: e.target.value})}
                       className="w-full bg-slate-800 border border-slate-700 focus:border-sky-500 rounded-2xl px-5 py-3 text-sm"
@@ -841,8 +889,8 @@ function App() {
                   </div>
                   <div>
                     <label className="text-xs text-slate-400 block mb-1.5">DATA</label>
-                    <input 
-                      type="date" 
+                    <input
+                      type="date"
                       value={formData.date}
                       onChange={(e) => setFormData({...formData, date: e.target.value})}
                       className="w-full bg-slate-800 border border-slate-700 focus:border-sky-500 rounded-2xl px-5 py-3 text-sm"
@@ -853,8 +901,8 @@ function App() {
                 <div className="grid grid-cols-2 gap-5">
                   <div>
                     <label className="text-xs text-slate-400 block mb-1.5">NAZIONE / REGIONE</label>
-                    <input 
-                      type="text" 
+                    <input
+                      type="text"
                       value={formData.nation}
                       onChange={(e) => setFormData({...formData, nation: e.target.value})}
                       placeholder="Ucraina"
@@ -863,8 +911,8 @@ function App() {
                   </div>
                   <div>
                     <label className="text-xs text-slate-400 block mb-1.5">FONTE</label>
-                    <input 
-                      type="text" 
+                    <input
+                      type="text"
                       value={formData.source}
                       onChange={(e) => setFormData({...formData, source: e.target.value})}
                       placeholder="Reuters / BBC"
@@ -877,7 +925,7 @@ function App() {
                 <div>
                   <div className="flex items-center justify-between mb-1.5">
                     <label className="text-xs text-slate-400">POSIZIONE GEOGRAFICA</label>
-                    <button 
+                    <button
                       type="button"
                       onClick={() => setIsPickingLocation(true)}
                       className="text-xs flex items-center gap-1 text-sky-400 hover:text-sky-300 transition-colors"
@@ -885,12 +933,12 @@ function App() {
                       <MapPin className="w-3.5 h-3.5" /> SELEZIONA SUL GLOBO
                     </button>
                   </div>
-                  
+
                   <div className="grid grid-cols-2 gap-4">
                     <div>
                       <div className="text-[10px] text-slate-500 mb-1">LATITUDINE</div>
-                      <input 
-                        type="number" 
+                      <input
+                        type="number"
                         step="0.0001"
                         value={formData.lat}
                         onChange={(e) => setFormData({...formData, lat: parseFloat(e.target.value) || 0})}
@@ -899,8 +947,8 @@ function App() {
                     </div>
                     <div>
                       <div className="text-[10px] text-slate-500 mb-1">LONGITUDINE</div>
-                      <input 
-                        type="number" 
+                      <input
+                        type="number"
                         step="0.0001"
                         value={formData.lng}
                         onChange={(e) => setFormData({...formData, lng: parseFloat(e.target.value) || 0})}
@@ -914,13 +962,13 @@ function App() {
             </div>
 
             <div className="bg-slate-950 px-8 py-5 flex gap-3 border-t border-slate-700">
-              <button 
+              <button
                 onClick={closeModal}
                 className="flex-1 py-3 rounded-2xl border border-slate-700 hover:bg-slate-900 text-sm font-medium"
               >
                 Annulla
               </button>
-              <button 
+              <button
                 onClick={saveNews}
                 className="flex-1 py-3 rounded-2xl bg-white text-slate-950 font-semibold text-sm"
               >
@@ -940,6 +988,47 @@ function App() {
             <div className="text-slate-400 max-w-xs mx-auto">Stiamo catturando ogni fotogramma del tuo video geopolitico. Non chiudere la finestra.</div>
             <div className="mt-8 text-xs text-slate-500">Durata stimata: ~{Math.ceil(news.length * 3.6)} secondi</div>
           </div>
+        </div>
+      )}
+
+      {/* Toast notification */}
+      {toast && (
+        <motion.div
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: 12 }}
+          className={`fixed bottom-8 left-1/2 -translate-x-1/2 z-[300] px-6 py-2.5 rounded-full text-sm font-medium text-white pointer-events-none ${
+            toast.type === 'error' ? 'bg-red-600' : 'bg-emerald-600'
+          }`}
+        >
+          {toast.message}
+        </motion.div>
+      )}
+
+      {/* Confirm dialog */}
+      {confirmDialog && (
+        <div className="fixed inset-0 bg-black/80 z-[250] flex items-center justify-center p-6">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.96 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="bg-slate-900 rounded-3xl border border-slate-700 p-8 max-w-sm w-full"
+          >
+            <p className="text-slate-200 text-sm mb-6 leading-relaxed">{confirmDialog.message}</p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setConfirmDialog(null)}
+                className="flex-1 py-3 rounded-2xl border border-slate-700 hover:bg-slate-800 text-sm transition-colors"
+              >
+                Annulla
+              </button>
+              <button
+                onClick={() => { confirmDialog.onConfirm(); setConfirmDialog(null); }}
+                className="flex-1 py-3 rounded-2xl bg-red-600 hover:bg-red-500 text-white text-sm font-semibold transition-colors"
+              >
+                Conferma
+              </button>
+            </div>
+          </motion.div>
         </div>
       )}
     </div>
