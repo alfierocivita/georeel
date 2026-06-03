@@ -60,5 +60,5 @@ npm run preview   # anteprima della build
 - globe.gl + Three.js
 - Tailwind CSS 3
 - Framer Motion 11
-- html2canvas (export PNG)
-- MediaRecorder API (export WebM)
+- Canvas 2D compositing (cover PNG con testo impresso)
+- MediaRecorder API (video WebM 9:16 con card impressa)
