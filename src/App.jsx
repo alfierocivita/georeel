@@ -63,6 +63,7 @@ const DEFAULT_THEME = {
     titleFont: 'Playfair Display', titleSize: 16, textSize: 12.5,
     titleColor: '#f8fafc', textColor: '#cbd5e1',
     bgColor: '#0b1220', bgOpacity: 0.92, accentColor: '#ff3b3b', borderWidth: 2,
+    transitionType: 'slide', transitionMs: 350,
     fields: { category: true, date: true, body: true, nation: true, source: true },
   },
 };
@@ -194,7 +195,7 @@ function App() {
   });
 
   const [settings, setSettings] = useState(() => {
-    const defaults = { holdMs: 3000, flyMs: 1200, altitude: 0.9, startLat: 20, startLng: 10, startAlt: 2.4, introMs: 800 };
+    const defaults = { holdMs: 3000, flyMs: 1200, altitude: 0.9, startLat: 20, startLng: 10, startAlt: 2.4, introMs: 800, outroType: 'hold', outroMs: 1500 };
     try { const s = localStorage.getItem('georeel-settings-v1'); if (s) return { ...defaults, ...JSON.parse(s) }; } catch { /* ignore */ }
     return defaults;
   });
@@ -207,6 +208,8 @@ function App() {
   const gridRef = useRef(null);
   const overlayRef = useRef(null);
   const countryCache = useRef({});
+  const cardTransRef = useRef({ active: false, start: 0, dur: 350, type: 'slide' });
+  const outroRef = useRef({ active: false, start: 0, dur: 0, type: 'none' });
 
   const pickingRef = useRef(false);
   const newsRef = useRef(news);
@@ -313,6 +316,7 @@ function App() {
     overlayMesh.renderOrder = 2;
     globe.scene().add(overlayMesh);
     overlayRef.current = overlayMesh;
+    setTimeout(enhanceTextures, 1200);
 
     return () => {
       try { globe._destructor && globe._destructor(); } catch { /* ignore */ }
@@ -323,13 +327,14 @@ function App() {
     };
   }, []);
 
-  // Texture + bumpScale
+  // Texture + bumpScale + quality
   useEffect(() => {
     const g = globeInstance.current;
     if (!g) return;
     const tex = TEXTURES[theme.texture];
     g.globeImageUrl(tex.url);
     try { const mat = g.globeMaterial(); if (mat) mat.bumpScale = tex.bumpScale ?? 5; } catch { /* ignore */ }
+    setTimeout(enhanceTextures, 600);
   }, [theme.texture]);
   // Atmosphere / accent
   useEffect(() => { globeInstance.current?.atmosphereColor(theme.accent).atmosphereAltitude(theme.atmosphere); }, [theme.accent, theme.atmosphere]);
@@ -399,12 +404,34 @@ function App() {
 
   useEffect(() => () => { clearTimeout(playState.current.slideTimer); clearTimeout(playState.current.zoomTimer); }, []);
 
+  // Apply max anisotropy + best filters whenever a texture loads
+  const enhanceTextures = () => {
+    const g = globeInstance.current;
+    if (!g) return;
+    try {
+      const mat = g.globeMaterial();
+      const maxAniso = g.renderer().capabilities.getMaxAnisotropy();
+      for (const key of ['map', 'bumpMap']) {
+        const t = mat?.[key];
+        if (!t) continue;
+        t.anisotropy = maxAniso;
+        t.minFilter = THREE.LinearMipmapLinearFilter;
+        t.magFilter = THREE.LinearFilter;
+        t.generateMipmaps = true;
+        t.needsUpdate = true;
+      }
+      if (mat) mat.needsUpdate = true;
+    } catch { /* ignore */ }
+  };
+
   const getCategoryColor = (c) => CATEGORY_COLORS[c] || '#64748b';
 
   const playStep = (i) => {
     const list = newsRef.current;
     if (!list.length) { stopPreview(); return; }
     const idx = ((i % list.length) + list.length) % list.length;
+    const c = themeRef.current.card;
+    cardTransRef.current = { active: true, start: performance.now(), dur: c.transitionMs ?? 350, type: c.transitionType ?? 'slide' };
     setCurrentIndex(idx);
     cinematicTo(list[idx]);
     playState.current.slideTimer = setTimeout(() => { if (playState.current.playing) playStep(idx + 1); }, settingsRef.current.holdMs);
@@ -458,8 +485,10 @@ function App() {
   };
 
   // ---------- Draw card on 2D canvas (matches DOM, for export) ----------
-  const drawCard = (ctx, s, item) => {
-    if (!item || !themeRef.current.showCards) return;
+  const drawCard = (ctx, s, item, alpha = 1, offsetY = 0) => {
+    if (!item || !themeRef.current.showCards || alpha <= 0) return;
+    ctx.save();
+    if (alpha < 1) ctx.globalAlpha = alpha;
     const c = themeRef.current.card;
     const f = c.fields;
     const pad = 16 * s;
@@ -489,6 +518,7 @@ function App() {
     if (c.position === 'top') cy = 30 * s;
     else if (c.position === 'center') cy = (640 * s - h) / 2;
     else cy = (640 - 30) * s - h;
+    cy += offsetY;
 
     // background
     ctx.save();
@@ -570,6 +600,7 @@ function App() {
       ctx.textBaseline = 'alphabetic';
     }
     ctx.textAlign = 'left';
+    ctx.restore();
   };
 
   const getGlobeCanvas = () => globeEl.current?.querySelector('canvas');
@@ -602,9 +633,31 @@ function App() {
     const comp = document.createElement('canvas'); comp.width = W; comp.height = H;
     const ctx = comp.getContext('2d');
     let raf;
-    const loop = () => { ctx.clearRect(0, 0, W, H); ctx.drawImage(g, 0, 0, W, H); drawCard(ctx, s, currentNewsRef.current); raf = requestAnimationFrame(loop); };
-    const stream = comp.captureStream(60);
-    const rec = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 12_000_000 });
+    const loop = () => {
+      ctx.clearRect(0, 0, W, H);
+      ctx.drawImage(g, 0, 0, W, H);
+      // Card transition
+      let cardAlpha = 1, cardOffsetY = 0;
+      const trans = cardTransRef.current;
+      if (trans.active) {
+        const t = Math.min(1, (performance.now() - trans.start) / Math.max(1, trans.dur));
+        const eased = 1 - Math.pow(1 - t, 3); // ease-out-cubic
+        cardAlpha = eased;
+        if (trans.type === 'slide') cardOffsetY = (1 - eased) * 28 * s;
+        if (t >= 1) trans.active = false;
+      }
+      drawCard(ctx, s, currentNewsRef.current, cardAlpha, cardOffsetY);
+      // Outro overlay
+      const outro = outroRef.current;
+      if (outro.active && outro.type === 'fade') {
+        const t = Math.min(1, (performance.now() - outro.start) / Math.max(1, outro.dur));
+        ctx.fillStyle = `rgba(0,0,0,${t * t})`;
+        ctx.fillRect(0, 0, W, H);
+      }
+      raf = requestAnimationFrame(loop);
+    };
+    const stream = comp.captureStream(120);
+    const rec = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 16_000_000 });
     const chunks = [];
     rec.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
     rec.onstop = () => {
@@ -616,6 +669,8 @@ function App() {
       setIsExporting(false); stopPreview();
     };
     stopPreview();
+    outroRef.current = { active: false, start: 0, dur: 0, type: 'none' };
+    cardTransRef.current = { active: false, start: 0, dur: 350, type: 'slide' };
     const st = settingsRef.current;
     if (globeInstance.current) {
       globeInstance.current.controls().autoRotate = false;
@@ -624,11 +679,17 @@ function App() {
     currentNewsRef.current = newsRef.current[0] || null;
     setCurrentIndex(0);
     setIsExporting(true);
+    const totalSlideMs = st.introMs + newsRef.current.length * st.holdMs;
+    const hasOutro = st.outroType !== 'none' && st.outroMs > 0;
     requestAnimationFrame(() => {
       loop(); rec.start();
       setTimeout(() => { startPreview(); }, st.introMs);
-      const totalMs = st.introMs + newsRef.current.length * st.holdMs + 800;
-      setTimeout(() => { try { rec.stop(); } catch { /* ignore */ } }, totalMs);
+      if (hasOutro) {
+        setTimeout(() => { outroRef.current = { active: true, start: performance.now(), dur: st.outroMs, type: st.outroType }; }, totalSlideMs);
+        setTimeout(() => { try { rec.stop(); } catch { /* ignore */ } }, totalSlideMs + st.outroMs + 300);
+      } else {
+        setTimeout(() => { try { rec.stop(); } catch { /* ignore */ } }, totalSlideMs + 600);
+      }
     });
   };
 
@@ -701,7 +762,10 @@ function App() {
             )}
             {theme.showCards && currentNews && (
               <div className="card-slot" style={slotStyle}>
-                <motion.div key={currentNews.id} initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4, ease: [0.23, 1, 0.32, 1] }}
+                <motion.div key={currentNews.id}
+                initial={card.transitionType === 'none' ? { opacity: 1, y: 0, scale: 1 } : card.transitionType === 'fade' ? { opacity: 0, y: 0, scale: 1 } : card.transitionType === 'zoom' ? { opacity: 0, scale: 0.92, y: 0 } : { opacity: 0, y: 22, scale: 1 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                transition={{ duration: (card.transitionMs || 350) / 1000, ease: [0.23, 1, 0.32, 1] }}
                   className="news-card" style={{
                     width: card.width, borderRadius: card.radius, textAlign: card.align,
                     background: hexA(card.bgColor, card.bgOpacity), backdropFilter: 'blur(6px)',
@@ -773,6 +837,11 @@ function App() {
                   </div>
                   <Slider label="Altitudine inizio" value={Math.round(settings.startAlt * 100)} min={50} max={500} step={5} display={`${settings.startAlt.toFixed(2)}x`} onChange={(v) => setSettings(s => ({ ...s, startAlt: v / 100 }))} />
                   <Slider label="Pausa intro" value={settings.introMs} min={0} max={4000} step={200} display={settings.introMs === 0 ? 'Nessuna' : fmtSec(settings.introMs)} onChange={(v) => setSettings(s => ({ ...s, introMs: v }))} />
+                  <div>
+                    <div className="text-[10px] text-slate-500 mb-1">Tipo outro</div>
+                    <Seg value={settings.outroType} onChange={(v) => setSettings(s => ({ ...s, outroType: v }))} options={[{ v: 'none', label: 'Nessuno' }, { v: 'hold', label: 'Hold' }, { v: 'fade', label: 'Fade nero' }]} />
+                  </div>
+                  {settings.outroType !== 'none' && <Slider label="Durata outro" value={settings.outroMs} min={500} max={5000} step={250} display={fmtSec(settings.outroMs)} onChange={(v) => setSettings(s => ({ ...s, outroMs: v }))} />}
                 </div>
                 <Toggle wide active={theme.showCards} onClick={() => setTheme(t => ({ ...t, showCards: !t.showCards }))} icon={<Layers className="w-4 h-4" />} label={theme.showCards ? 'Card notizie: ON' : 'Solo punti (card OFF)'} accent={accent} />
                 <button onClick={resetCamera} className="w-full py-2.5 text-xs rounded-2xl border border-slate-800 hover:bg-slate-800 flex items-center justify-center gap-2"><RotateCcw className="w-3.5 h-3.5" /> RESET CAMERA</button>
@@ -838,6 +907,13 @@ function App() {
 
             {tab === 'card' && (
               <>
+                <div className="bg-slate-900 rounded-2xl p-4 space-y-3">
+                  <div>
+                    <div className="text-[10px] text-slate-500 mb-1">Animazione entrata</div>
+                    <Seg value={card.transitionType} onChange={(v) => setCard({ transitionType: v })} options={[{ v: 'none', label: 'Istantanea' }, { v: 'fade', label: 'Fade' }, { v: 'slide', label: 'Slide' }, { v: 'zoom', label: 'Zoom' }]} />
+                  </div>
+                  {card.transitionType !== 'none' && <Slider label="Durata animazione" value={card.transitionMs} min={100} max={900} step={50} display={`${card.transitionMs}ms`} onChange={(v) => setCard({ transitionMs: v })} />}
+                </div>
                 <div>
                   <div className="text-[11px] text-slate-400 mb-2">Posizione</div>
                   <Seg value={card.position} onChange={(v) => setCard({ position: v })} options={[{ v: 'top', label: 'Alto' }, { v: 'center', label: 'Centro' }, { v: 'bottom', label: 'Basso' }]} />
