@@ -46,6 +46,9 @@ const DEFAULT_THEME = {
   texture: 'night',
   accent: '#ff3b3b',
   atmosphere: 0.16,
+  planetTint: '#ffffff',
+  planetEmissive: '#000000',
+  planetEmissiveInt: 0,
   showGrid: true,
   gridColor: '#ff6b6b',
   gridOpacity: 0.22,
@@ -174,7 +177,11 @@ function App() {
     return DEFAULT_THEME;
   });
 
-  const [settings, setSettings] = useState({ holdMs: 3000, flyMs: 1200, altitude: 0.9 });
+  const [settings, setSettings] = useState(() => {
+    const defaults = { holdMs: 3000, flyMs: 1200, altitude: 0.9, startLat: 20, startLng: 10, startAlt: 2.4, introMs: 800 };
+    try { const s = localStorage.getItem('georeel-settings-v1'); if (s) return { ...defaults, ...JSON.parse(s) }; } catch { /* ignore */ }
+    return defaults;
+  });
   const [toast, setToast] = useState(null);
   const [confirmDialog, setConfirmDialog] = useState(null);
   const [formError, setFormError] = useState('');
@@ -212,6 +219,7 @@ function App() {
   // Persist
   useEffect(() => { try { localStorage.setItem('georeel-news', JSON.stringify(news)); } catch { /* ignore */ } }, [news]);
   useEffect(() => { try { localStorage.setItem('georeel-theme-v2', JSON.stringify(theme)); } catch { /* ignore */ } }, [theme]);
+  useEffect(() => { try { localStorage.setItem('georeel-settings-v1', JSON.stringify(settings)); } catch { /* ignore */ } }, [settings]);
 
   const flyTo = (item, altitude, ms) => {
     if (globeInstance.current && item) globeInstance.current.pointOfView({ lat: item.lat, lng: item.lng, altitude }, ms);
@@ -268,6 +276,14 @@ function App() {
     grid.visible = th.showGrid;
     globe.scene().add(grid);
     gridRef.current = grid;
+
+    try {
+      const mat = globe.globeMaterial();
+      if (mat) {
+        mat.color.set(th.planetTint || '#ffffff');
+        if (mat.emissive) { mat.emissive.set(th.planetEmissive || '#000000'); mat.emissiveIntensity = th.planetEmissiveInt ?? 0; }
+      }
+    } catch { /* ignore */ }
 
     return () => {
       try { globe._destructor && globe._destructor(); } catch { /* ignore */ }
@@ -332,6 +348,14 @@ function App() {
     } else g.polygonsData([]);
   }, [news, currentIndex, theme.showBorder, theme.borderColor, theme.borderOpacity]);
 
+  // Planet color grading
+  useEffect(() => {
+    const mat = globeInstance.current?.globeMaterial();
+    if (!mat) return;
+    mat.color.set(theme.planetTint || '#ffffff');
+    if (mat.emissive) { mat.emissive.set(theme.planetEmissive || '#000000'); mat.emissiveIntensity = theme.planetEmissiveInt ?? 0; }
+  }, [theme.planetTint, theme.planetEmissive, theme.planetEmissiveInt]);
+
   useEffect(() => () => { clearTimeout(playState.current.slideTimer); clearTimeout(playState.current.zoomTimer); }, []);
 
   const getCategoryColor = (c) => CATEGORY_COLORS[c] || '#64748b';
@@ -384,6 +408,12 @@ function App() {
     globeInstance.current?.pointOfView({ lat: 20, lng: 10, altitude: 2.4 }, 1000);
     if (globeInstance.current) globeInstance.current.controls().autoRotate = true;
     setCurrentIndex(0);
+  };
+  const captureCurrentView = () => {
+    const pov = globeInstance.current?.pointOfView();
+    if (!pov) { showToast('Globo non pronto', 'error'); return; }
+    setSettings(s => ({ ...s, startLat: parseFloat(pov.lat.toFixed(4)), startLng: parseFloat(pov.lng.toFixed(4)), startAlt: parseFloat(pov.altitude.toFixed(3)) }));
+    showToast('Punto di inizio aggiornato');
   };
 
   // ---------- Draw card on 2D canvas (matches DOM, for export) ----------
@@ -540,9 +570,21 @@ function App() {
       URL.revokeObjectURL(url);
       setIsExporting(false); stopPreview();
     };
+    stopPreview();
+    const st = settingsRef.current;
+    if (globeInstance.current) {
+      globeInstance.current.controls().autoRotate = false;
+      globeInstance.current.pointOfView({ lat: st.startLat, lng: st.startLng, altitude: st.startAlt }, 0);
+    }
+    currentNewsRef.current = newsRef.current[0] || null;
+    setCurrentIndex(0);
     setIsExporting(true);
-    loop(); rec.start(); startPreview();
-    setTimeout(() => { try { rec.stop(); } catch { /* ignore */ } }, newsRef.current.length * settings.holdMs + 600);
+    requestAnimationFrame(() => {
+      loop(); rec.start();
+      setTimeout(() => { startPreview(); }, st.introMs);
+      const totalMs = st.introMs + newsRef.current.length * st.holdMs + 800;
+      setTimeout(() => { try { rec.stop(); } catch { /* ignore */ } }, totalMs);
+    });
   };
 
   const currentNews = news[currentIndex] || null;
@@ -667,6 +709,26 @@ function App() {
                   <Slider label="Velocità zoom-in" value={settings.flyMs} min={400} max={2500} step={100} display={fmtSec(settings.flyMs)} onChange={(v) => setSettings(s => ({ ...s, flyMs: v }))} />
                   <Slider label="Zoom camera" value={Math.round((2.0 - settings.altitude) * 100)} min={20} max={150} step={5} display={`${Math.round((2.0 - settings.altitude) * 100)}%`} onChange={(v) => setSettings(s => ({ ...s, altitude: 2.0 - v / 100 }))} />
                 </div>
+                <div className="space-y-4 bg-slate-900 rounded-2xl p-4">
+                  <div className="flex items-center justify-between">
+                    <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">Punto di inizio render</div>
+                    <button onClick={captureCurrentView} className="text-[10px] flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 transition-colors" style={{ color: accent }}>
+                      <MapPin className="w-3 h-3" /> Vista corrente
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <div className="text-[10px] text-slate-500 mb-1">Lat</div>
+                      <input type="number" step="0.01" value={settings.startLat} onChange={(e) => setSettings(s => ({ ...s, startLat: parseFloat(e.target.value) || 0 }))} className="inp text-xs font-mono" />
+                    </div>
+                    <div>
+                      <div className="text-[10px] text-slate-500 mb-1">Lng</div>
+                      <input type="number" step="0.01" value={settings.startLng} onChange={(e) => setSettings(s => ({ ...s, startLng: parseFloat(e.target.value) || 0 }))} className="inp text-xs font-mono" />
+                    </div>
+                  </div>
+                  <Slider label="Altitudine inizio" value={Math.round(settings.startAlt * 100)} min={50} max={500} step={5} display={`${settings.startAlt.toFixed(2)}x`} onChange={(v) => setSettings(s => ({ ...s, startAlt: v / 100 }))} />
+                  <Slider label="Pausa intro" value={settings.introMs} min={0} max={4000} step={200} display={settings.introMs === 0 ? 'Nessuna' : fmtSec(settings.introMs)} onChange={(v) => setSettings(s => ({ ...s, introMs: v }))} />
+                </div>
                 <Toggle wide active={theme.showCards} onClick={() => setTheme(t => ({ ...t, showCards: !t.showCards }))} icon={<Layers className="w-4 h-4" />} label={theme.showCards ? 'Card notizie: ON' : 'Solo punti (card OFF)'} accent={accent} />
                 <button onClick={resetCamera} className="w-full py-2.5 text-xs rounded-2xl border border-slate-800 hover:bg-slate-800 flex items-center justify-center gap-2"><RotateCcw className="w-3.5 h-3.5" /> RESET CAMERA</button>
                 <div>
@@ -699,6 +761,12 @@ function App() {
                       <button key={k} onClick={() => setTheme(th => ({ ...th, texture: k }))} className={`py-2.5 rounded-xl text-xs border transition-all ${theme.texture === k ? '' : 'border-slate-800 text-slate-400 hover:border-slate-700'}`} style={theme.texture === k ? { borderColor: accent, background: accent + '1a', color: accent } : {}}>{t.label}</button>
                     ))}
                   </div>
+                </div>
+                <div className="bg-slate-900 rounded-2xl p-4 space-y-4">
+                  <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">Grading colore pianeta</div>
+                  <ColorRow label="Tinta (moltiplica texture)" value={theme.planetTint} onChange={(v) => setTheme(t => ({ ...t, planetTint: v }))} />
+                  <ColorRow label="Bagliore emissivo" value={theme.planetEmissive} onChange={(v) => setTheme(t => ({ ...t, planetEmissive: v }))} />
+                  <Slider label="Intensità bagliore" value={Math.round((theme.planetEmissiveInt || 0) * 100)} min={0} max={80} step={5} display={`${Math.round((theme.planetEmissiveInt || 0) * 100)}%`} onChange={(v) => setTheme(t => ({ ...t, planetEmissiveInt: v / 100 }))} />
                 </div>
                 <div className="bg-slate-900 rounded-2xl p-4 space-y-4">
                   <ColorRow label="Colore accento (atmosfera/pin/rotte)" value={theme.accent} onChange={(v) => setTheme(t => ({ ...t, accent: v }))} />
