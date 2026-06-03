@@ -4,9 +4,10 @@ import Globe from 'globe.gl';
 import { feature } from 'topojson-client';
 import countriesTopo from 'world-atlas/countries-110m.json';
 import { motion, Reorder } from 'framer-motion';
+import { Output, Mp4OutputFormat, WebMOutputFormat, BufferTarget, CanvasSource, QUALITY_HIGH, getFirstEncodableVideoCodec } from 'mediabunny';
 import {
   Play, Pause, Download, Image as ImageIcon, Plus, Trash2, Edit2,
-  MapPin, RotateCcw, Globe as GlobeIcon, Route, Grid3x3, Layers
+  MapPin, RotateCcw, Globe as GlobeIcon, Route, Grid3x3, Layers, Type, Clock
 } from 'lucide-react';
 
 const CATEGORY_COLORS = {
@@ -81,10 +82,12 @@ const VIDEO_MIME =
   typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported('video/mp4') ? 'video/mp4' :
   'video/webm';
 const VIDEO_EXT = VIDEO_MIME.startsWith('video/mp4') ? 'MP4' : 'WEBM';
+const HQ_AVAILABLE = typeof window !== 'undefined' && 'VideoEncoder' in window;
 
 // Module-scope helpers (out of render for purity)
 const newId = () => Date.now();
 const fileStamp = () => Date.now();
+const nowMs = () => performance.now();
 const todayISO = () => new Date().toISOString().split('T')[0];
 
 const clamp01 = (n) => Math.max(0, Math.min(1, n));
@@ -169,6 +172,60 @@ function roundRect(ctx, x, y, w, h, r) {
   ctx.closePath();
 }
 
+// ---------- Storyboard (deterministic camera path for the reel) ----------
+const hasGeo = (item) => item && item.type !== 'info' && Number.isFinite(item.lat) && Number.isFinite(item.lng);
+const lerp = (a, b, t) => a + (b - a) * t;
+const lerpLng = (a, b, t) => { const d = ((b - a + 540) % 360) - 180; return a + d * t; };
+const easeInOut = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
+
+// Builds time→camera + time→active-card lookup. Mirrors live cinematicTo().
+function buildStoryboard(clips, st, cardTransMs) {
+  const start = { lat: st.startLat, lng: st.startLng, alt: st.startAlt };
+  const segs = [];
+  let t = 0;
+  segs.push({ t0: 0, t1: st.introMs, kind: 'intro', cam: start, clip: clips.length ? 0 : -1, animate: false });
+  t = st.introMs;
+  let prev = start;
+  clips.forEach((clip, i) => {
+    const dur = clip.duration || st.holdMs;
+    const to = hasGeo(clip) ? { lat: clip.lat, lng: clip.lng, alt: st.altitude } : prev;
+    segs.push({ t0: t, t1: t + dur, kind: 'clip', from: prev, to, clip: i, flyMs: st.flyMs, animate: !(i === 0 && st.introMs > 0) });
+    t += dur; prev = to;
+  });
+  const reelEnd = t;
+  let total = t;
+  const hasOutro = st.outroType !== 'none' && st.outroMs > 0;
+  if (hasOutro) { segs.push({ t0: t, t1: t + st.outroMs, kind: 'outro', cam: prev, clip: clips.length - 1, animate: false }); total += st.outroMs; }
+
+  const segAt = (tms) => segs.find(s => tms >= s.t0 && tms < s.t1) || segs[segs.length - 1];
+  const povAt = (tms) => {
+    const s = segAt(tms);
+    if (s.kind !== 'clip') return s.cam;
+    const local = tms - s.t0, fly = s.flyMs, { from, to } = s;
+    const llP = Math.min(1, local / (fly * 0.45)), e = easeInOut(llP);
+    const lat = lerp(from.lat, to.lat, e);
+    const lng = lerpLng(from.lng, to.lng, e);
+    const far = Math.min(2.4, to.alt + 0.9);
+    let alt;
+    if (local <= fly * 0.45) alt = lerp(from.alt, far, easeInOut(Math.min(1, local / (fly * 0.45))));
+    else alt = lerp(far, to.alt, easeInOut(Math.min(1, (local - fly * 0.45) / (fly * 0.6))));
+    return { lat, lng, alt };
+  };
+  const cardAt = (tms) => {
+    const s = segAt(tms);
+    let alpha = 1;
+    if (s.kind === 'clip' && s.animate) {
+      const local = tms - s.t0;
+      alpha = Math.min(1, local / Math.max(1, cardTransMs));
+      alpha = 1 - Math.pow(1 - alpha, 3);
+    }
+    const fadeBlack = (s.kind === 'outro' && st.outroType === 'fade')
+      ? Math.pow(Math.min(1, (tms - s.t0) / Math.max(1, st.outroMs)), 2) : 0;
+    return { clip: s.clip, alpha, fadeBlack };
+  };
+  return { total, reelEnd, povAt, cardAt };
+}
+
 function App() {
   const [news, setNews] = useState(() => {
     try { const s = localStorage.getItem('georeel-news'); return s ? JSON.parse(s) : SAMPLE_NEWS; }
@@ -195,13 +252,14 @@ function App() {
   });
 
   const [settings, setSettings] = useState(() => {
-    const defaults = { holdMs: 3000, flyMs: 1200, altitude: 0.9, startLat: 20, startLng: 10, startAlt: 2.4, introMs: 800, outroType: 'hold', outroMs: 1500 };
+    const defaults = { holdMs: 3000, flyMs: 1200, altitude: 0.9, startLat: 20, startLng: 10, startAlt: 2.4, introMs: 800, outroType: 'hold', outroMs: 1500, autoSpin: true };
     try { const s = localStorage.getItem('georeel-settings-v1'); if (s) return { ...defaults, ...JSON.parse(s) }; } catch { /* ignore */ }
     return defaults;
   });
   const [toast, setToast] = useState(null);
   const [confirmDialog, setConfirmDialog] = useState(null);
   const [formError, setFormError] = useState('');
+  const [exportPct, setExportPct] = useState(0);
 
   const globeEl = useRef(null);
   const globeInstance = useRef(null);
@@ -245,8 +303,29 @@ function App() {
   const flyTo = (item, altitude, ms) => {
     if (globeInstance.current && item) globeInstance.current.pointOfView({ lat: item.lat, lng: item.lng, altitude }, ms);
   };
-  // Cinematic zoom-in: approach pulled-back, then dolly in
+  // Apply max anisotropy + best filters whenever a texture loads
+  const enhanceTextures = () => {
+    const g = globeInstance.current;
+    if (!g) return;
+    try {
+      const mat = g.globeMaterial();
+      const maxAniso = g.renderer().capabilities.getMaxAnisotropy();
+      for (const key of ['map', 'bumpMap']) {
+        const t = mat?.[key];
+        if (!t) continue;
+        t.anisotropy = maxAniso;
+        t.minFilter = THREE.LinearMipmapLinearFilter;
+        t.magFilter = THREE.LinearFilter;
+        t.generateMipmaps = true;
+        t.needsUpdate = true;
+      }
+      if (mat) mat.needsUpdate = true;
+    } catch { /* ignore */ }
+  };
+
+  // Cinematic zoom-in: approach pulled-back, then dolly in (info cards hold the camera)
   const cinematicTo = (item) => {
+    if (!hasGeo(item)) return;
     const s = settingsRef.current;
     const close = s.altitude;
     const far = Math.min(2.4, close + 0.9);
@@ -347,11 +426,12 @@ function App() {
     grid.material.color.set(theme.gridColor);
   }, [theme.showGrid, theme.gridOpacity, theme.gridColor]);
 
-  // Points + active highlight
+  // Points + active highlight (info cards have no geo → no point)
   useEffect(() => {
     const g = globeInstance.current;
     if (!g) return;
-    g.pointsData(news.map((item, idx) => ({ ...item, color: CATEGORY_COLORS[item.category] || '#64748b', __r: idx === currentIndex ? 0.75 : 0.4 })))
+    const activeId = news[currentIndex]?.id;
+    g.pointsData(news.filter(hasGeo).map((item) => ({ ...item, color: CATEGORY_COLORS[item.category] || '#64748b', __r: item.id === activeId ? 0.75 : 0.4 })))
      .pointRadius(d => d.__r);
   }, [news, currentIndex]);
 
@@ -360,16 +440,17 @@ function App() {
     const g = globeInstance.current;
     if (!g) return;
     const item = news[currentIndex];
-    g.ringsData(item ? [{ lat: item.lat, lng: item.lng }] : []);
+    g.ringsData(hasGeo(item) ? [{ lat: item.lat, lng: item.lng }] : []);
   }, [news, currentIndex]);
 
-  // Route arcs
+  // Route arcs (only between geo clips)
   useEffect(() => {
     const g = globeInstance.current;
     if (!g) return;
-    if (!theme.showRoutes || news.length < 2) { g.arcsData([]); return; }
-    g.arcColor(() => theme.accent).arcsData(news.map((n, i) => {
-      const next = news[(i + 1) % news.length];
+    const geo = news.filter(hasGeo);
+    if (!theme.showRoutes || geo.length < 2) { g.arcsData([]); return; }
+    g.arcColor(() => theme.accent).arcsData(geo.map((n, i) => {
+      const next = geo[(i + 1) % geo.length];
       return { startLat: n.lat, startLng: n.lng, endLat: next.lat, endLng: next.lng };
     }));
   }, [news, theme.showRoutes, theme.accent]);
@@ -379,7 +460,7 @@ function App() {
     const g = globeInstance.current;
     if (!g) return;
     const item = news[currentIndex];
-    const country = (theme.showBorder && item) ? findCountryCached(countryCache, item.lat, item.lng) : null;
+    const country = (theme.showBorder && hasGeo(item)) ? findCountryCached(countryCache, item.lat, item.lng) : null;
     if (country) {
       g.polygonsData([country]).polygonAltitude(0.006)
        .polygonCapColor(() => hexA(theme.borderColor, theme.borderOpacity * 0.28))
@@ -394,6 +475,11 @@ function App() {
     const mat = globeInstance.current?.globeMaterial();
     if (mat?.emissive) { mat.emissive.set(theme.planetEmissive || '#000000'); mat.emissiveIntensity = theme.planetEmissiveInt ?? 0; }
   }, [theme.planetEmissive, theme.planetEmissiveInt]);
+  // Idle auto-spin (paused during preview/export)
+  useEffect(() => {
+    const ctrl = globeInstance.current?.controls();
+    if (ctrl) ctrl.autoRotate = settings.autoSpin && !isPlaying && !isExporting;
+  }, [settings.autoSpin, isPlaying, isExporting]);
   // Planet color overlay
   useEffect(() => {
     const overlay = overlayRef.current;
@@ -404,26 +490,6 @@ function App() {
 
   useEffect(() => () => { clearTimeout(playState.current.slideTimer); clearTimeout(playState.current.zoomTimer); }, []);
 
-  // Apply max anisotropy + best filters whenever a texture loads
-  const enhanceTextures = () => {
-    const g = globeInstance.current;
-    if (!g) return;
-    try {
-      const mat = g.globeMaterial();
-      const maxAniso = g.renderer().capabilities.getMaxAnisotropy();
-      for (const key of ['map', 'bumpMap']) {
-        const t = mat?.[key];
-        if (!t) continue;
-        t.anisotropy = maxAniso;
-        t.minFilter = THREE.LinearMipmapLinearFilter;
-        t.magFilter = THREE.LinearFilter;
-        t.generateMipmaps = true;
-        t.needsUpdate = true;
-      }
-      if (mat) mat.needsUpdate = true;
-    } catch { /* ignore */ }
-  };
-
   const getCategoryColor = (c) => CATEGORY_COLORS[c] || '#64748b';
 
   const playStep = (i) => {
@@ -431,10 +497,11 @@ function App() {
     if (!list.length) { stopPreview(); return; }
     const idx = ((i % list.length) + list.length) % list.length;
     const c = themeRef.current.card;
-    cardTransRef.current = { active: true, start: performance.now(), dur: c.transitionMs ?? 350, type: c.transitionType ?? 'slide' };
+    cardTransRef.current = { active: true, start: nowMs(), dur: c.transitionMs ?? 350, type: c.transitionType ?? 'slide' };
     setCurrentIndex(idx);
     cinematicTo(list[idx]);
-    playState.current.slideTimer = setTimeout(() => { if (playState.current.playing) playStep(idx + 1); }, settingsRef.current.holdMs);
+    const dur = list[idx].duration || settingsRef.current.holdMs;
+    playState.current.slideTimer = setTimeout(() => { if (playState.current.playing) playStep(idx + 1); }, dur);
   };
   const startPreview = () => {
     if (!newsRef.current.length) { showToast('Aggiungi almeno una notizia', 'error'); return; }
@@ -448,7 +515,7 @@ function App() {
     clearTimeout(playState.current.zoomTimer);
     playState.current = { playing: false, slideTimer: null, zoomTimer: null };
     setIsPlaying(false);
-    if (globeInstance.current) globeInstance.current.controls().autoRotate = true;
+    if (globeInstance.current) globeInstance.current.controls().autoRotate = settingsRef.current.autoSpin;
   };
   const togglePlay = () => (isPlaying ? stopPreview() : startPreview());
   const selectNews = (index) => { setCurrentIndex(index); cinematicTo(news[index]); };
@@ -459,22 +526,30 @@ function App() {
     setFormData({ title: '', text: '', category: 'Conflitto', date: todayISO(), source: '', nation: '', lat: 41.9028, lng: 12.4964 });
     setShowModal(true); setIsPickingLocation(false);
   };
+  const openAddInfo = () => {
+    setEditingNews(null); setFormError('');
+    setFormData({ title: 'Titolo info', text: 'Testo descrittivo aggiuntivo…', type: 'info', category: 'Info', date: '', source: '', nation: '', lat: null, lng: null });
+    setShowModal(true); setIsPickingLocation(false);
+  };
   const openEditModal = (item) => { setEditingNews(item); setFormError(''); setFormData({ ...item }); setShowModal(true); setIsPickingLocation(false); };
   const closeModal = () => { setShowModal(false); setFormError(''); setIsPickingLocation(false); };
   const saveNews = () => {
     if (!formData.title.trim() || !formData.text.trim()) { setFormError('Titolo e descrizione sono obbligatori'); return; }
-    const item = { ...formData, id: editingNews ? editingNews.id : newId(), lat: parseFloat(formData.lat), lng: parseFloat(formData.lng) };
+    const isInfo = formData.type === 'info';
+    const item = { ...formData, id: editingNews ? editingNews.id : newId(),
+      lat: isInfo ? null : parseFloat(formData.lat), lng: isInfo ? null : parseFloat(formData.lng) };
     setNews(prev => editingNews ? prev.map(n => n.id === editingNews.id ? item : n) : [...prev, item]);
     closeModal();
   };
-  const deleteNews = (id) => showConfirm('Eliminare questa notizia?', () => {
+  const deleteNews = (id) => showConfirm('Eliminare questa clip?', () => {
     setNews(prev => { const f = prev.filter(n => n.id !== id); if (currentIndex >= f.length) setCurrentIndex(Math.max(0, f.length - 1)); return f; });
   });
+  const setClipDuration = (id, ms) => setNews(prev => prev.map(n => n.id === id ? { ...n, duration: ms } : n));
   const loadSampleData = () => showConfirm('Caricare i dati di esempio? (sostituisce le notizie attuali)', () => { setNews(SAMPLE_NEWS); setCurrentIndex(0); });
   const resetCamera = () => {
     stopPreview();
-    globeInstance.current?.pointOfView({ lat: 20, lng: 10, altitude: 2.4 }, 1000);
-    if (globeInstance.current) globeInstance.current.controls().autoRotate = true;
+    globeInstance.current?.pointOfView({ lat: settings.startLat, lng: settings.startLng, altitude: settings.startAlt }, 1000);
+    if (globeInstance.current) globeInstance.current.controls().autoRotate = settings.autoSpin;
     setCurrentIndex(0);
   };
   const captureCurrentView = () => {
@@ -490,7 +565,7 @@ function App() {
     ctx.save();
     if (alpha < 1) ctx.globalAlpha = alpha;
     const c = themeRef.current.card;
-    const f = c.fields;
+    const f = item.type === 'info' ? { category: false, date: false, body: true, nation: false, source: false } : c.fields;
     const pad = 16 * s;
     const cw = c.width * s;
     const innerW = cw - pad * 2;
@@ -619,7 +694,108 @@ function App() {
     a.click();
   };
 
+  // Position the globe camera deterministically (no tween) for offline rendering
+  const setCameraPOV = (pov) => {
+    const g = globeInstance.current;
+    if (!g) return;
+    const c = g.getCoords(pov.lat, pov.lng, pov.alt);
+    const cam = g.camera();
+    cam.position.set(c.x, c.y, c.z);
+    cam.lookAt(0, 0, 0);
+    g.controls().target.set(0, 0, 0);
+    g.renderer().render(g.scene(), cam);
+  };
+
+  // Deterministic frame-by-frame export via WebCodecs (smooth, not a screen grab)
+  const exportVideoHQ = async () => {
+    const g = getGlobeCanvas();
+    if (!g) { showToast('Globo non pronto', 'error'); return; }
+    const clips = newsRef.current;
+    if (!clips.length) { showToast('Aggiungi almeno una clip', 'error'); return; }
+    const st = settingsRef.current;
+    const W = g.width, H = g.height, s = W / 360;
+    const fps = 60;
+    const comp = document.createElement('canvas'); comp.width = W; comp.height = H;
+    const ctx = comp.getContext('2d');
+
+    const codecPref = ['avc', 'hevc', 'av1', 'vp9'];
+    let codec = null;
+    try { codec = await getFirstEncodableVideoCodec(codecPref, { width: W, height: H }); } catch { /* ignore */ }
+    if (!codec) { showToast('WebCodecs non disponibile, uso cattura schermo', 'error'); return exportVideoCapture(); }
+    const isMp4 = codec === 'avc' || codec === 'hevc' || codec === 'av1';
+    const ext = isMp4 ? 'mp4' : 'webm';
+
+    const output = new Output({
+      format: isMp4 ? new Mp4OutputFormat({ fastStart: 'in-memory' }) : new WebMOutputFormat(),
+      target: new BufferTarget(),
+    });
+    const source = new CanvasSource(comp, { codec, bitrate: QUALITY_HIGH, keyFrameInterval: 2 });
+    output.addVideoTrack(source, { frameRate: fps });
+
+    stopPreview();
+    setIsExporting(true);
+    setExportPct(0);
+    const ctrl = globeInstance.current?.controls();
+    const prevAuto = ctrl?.autoRotate;
+    if (ctrl) { ctrl.autoRotate = false; ctrl.enabled = false; }
+
+    try {
+      await output.start();
+      const sb = buildStoryboard(clips, st, themeRef.current.card.transitionMs ?? 350);
+      const totalFrames = Math.max(1, Math.ceil((sb.total / 1000) * fps));
+      const transType = themeRef.current.card.transitionType ?? 'slide';
+      const frameDur = 1 / fps;
+
+      for (let f = 0; f < totalFrames; f++) {
+        const tms = (f / fps) * 1000;
+        const pov = sb.povAt(tms);
+        const { clip, alpha, fadeBlack } = sb.cardAt(tms);
+        const item = clips[clip] || null;
+        currentNewsRef.current = item;
+
+        setCameraPOV(pov);
+        ctx.clearRect(0, 0, W, H);
+        ctx.drawImage(g, 0, 0, W, H);
+        const offsetY = transType === 'slide' ? (1 - alpha) * 28 * s : 0;
+        const drawAlpha = transType === 'none' ? 1 : alpha;
+        const scale = transType === 'zoom' ? 0.92 + 0.08 * alpha : 1;
+        if (scale !== 1) {
+          ctx.save();
+          ctx.translate(W / 2, H / 2); ctx.scale(scale, scale); ctx.translate(-W / 2, -H / 2);
+          drawCard(ctx, s, item, drawAlpha, offsetY);
+          ctx.restore();
+        } else {
+          drawCard(ctx, s, item, drawAlpha, offsetY);
+        }
+        if (fadeBlack > 0) { ctx.fillStyle = `rgba(0,0,0,${fadeBlack})`; ctx.fillRect(0, 0, W, H); }
+
+        await source.add(f / fps, frameDur);
+        if (f % 4 === 0) setExportPct(Math.round((f / totalFrames) * 100));
+      }
+      await output.finalize();
+      const blob = new Blob([output.target.buffer], { type: isMp4 ? 'video/mp4' : 'video/webm' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href = url; a.download = `GeoReel_${new Date().toISOString().slice(0, 10)}.${ext}`; a.click();
+      URL.revokeObjectURL(url);
+      showToast('Video esportato ✓');
+    } catch (err) {
+      console.error(err);
+      showToast('Errore export, uso cattura schermo', 'error');
+      if (ctrl) { ctrl.autoRotate = prevAuto; ctrl.enabled = true; }
+      setIsExporting(false); setExportPct(0);
+      return exportVideoCapture();
+    }
+    if (ctrl) { ctrl.autoRotate = prevAuto; ctrl.enabled = true; }
+    setIsExporting(false); setExportPct(0);
+    stopPreview();
+  };
+
   const exportVideo = () => {
+    if (typeof window !== 'undefined' && 'VideoEncoder' in window) return exportVideoHQ();
+    return exportVideoCapture();
+  };
+
+  const exportVideoCapture = () => {
     const g = getGlobeCanvas();
     if (!g || !g.captureStream) { showToast('Cattura video non supportata dal browser', 'error'); return; }
     const mimeType =
@@ -640,7 +816,7 @@ function App() {
       let cardAlpha = 1, cardOffsetY = 0;
       const trans = cardTransRef.current;
       if (trans.active) {
-        const t = Math.min(1, (performance.now() - trans.start) / Math.max(1, trans.dur));
+        const t = Math.min(1, (nowMs() - trans.start) / Math.max(1, trans.dur));
         const eased = 1 - Math.pow(1 - t, 3); // ease-out-cubic
         cardAlpha = eased;
         if (trans.type === 'slide') cardOffsetY = (1 - eased) * 28 * s;
@@ -650,7 +826,7 @@ function App() {
       // Outro overlay
       const outro = outroRef.current;
       if (outro.active && outro.type === 'fade') {
-        const t = Math.min(1, (performance.now() - outro.start) / Math.max(1, outro.dur));
+        const t = Math.min(1, (nowMs() - outro.start) / Math.max(1, outro.dur));
         ctx.fillStyle = `rgba(0,0,0,${t * t})`;
         ctx.fillRect(0, 0, W, H);
       }
@@ -685,7 +861,7 @@ function App() {
       loop(); rec.start();
       setTimeout(() => { startPreview(); }, st.introMs);
       if (hasOutro) {
-        setTimeout(() => { outroRef.current = { active: true, start: performance.now(), dur: st.outroMs, type: st.outroType }; }, totalSlideMs);
+        setTimeout(() => { outroRef.current = { active: true, start: nowMs(), dur: st.outroMs, type: st.outroType }; }, totalSlideMs);
         setTimeout(() => { try { rec.stop(); } catch { /* ignore */ } }, totalSlideMs + st.outroMs + 300);
       } else {
         setTimeout(() => { try { rec.stop(); } catch { /* ignore */ } }, totalSlideMs + 600);
@@ -748,13 +924,18 @@ function App() {
         </div>
 
         {/* CENTER — 9:16 */}
-        <div className="flex-1 flex flex-col items-center justify-center bg-[#070b14] p-6">
-          <div className="mb-4 flex items-center gap-2 text-xs">
+        <div className="flex-1 flex flex-col bg-[#070b14] min-h-0 overflow-hidden">
+          <div className="flex-1 flex flex-col items-center justify-center min-h-0 px-4 pt-3 pb-2">
+          <div className="mb-2 flex items-center gap-2 text-xs">
             <div className="px-3 py-1 rounded-full bg-slate-900 flex items-center gap-2 border border-slate-800"><div className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: accent }} /> LIVE 9:16</div>
             <div className="text-slate-500 font-mono">720×1280</div>
           </div>
           <div className="viewport">
             <div className="globe-container" ref={globeEl} />
+            <button onClick={() => setSettings(s => ({ ...s, autoSpin: !s.autoSpin }))} title={settings.autoSpin ? 'Ferma rotazione' : 'Avvia rotazione'}
+              className="absolute bottom-3 right-3 z-50 w-9 h-9 rounded-full bg-black/55 backdrop-blur border border-white/15 flex items-center justify-center text-white/90 hover:bg-black/75 transition-colors">
+              {settings.autoSpin ? <Pause className="w-4 h-4" /> : <RotateCcw className="w-4 h-4" />}
+            </button>
             {isPickingLocation && (
               <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
                 <div className="text-center px-8"><MapPin className="w-10 h-10 mx-auto mb-3" style={{ color: accent }} /><div className="text-white text-lg font-semibold">Clicca sul globo</div><div className="text-slate-400 mt-1 text-sm">Scegli la posizione della notizia</div></div>
@@ -771,15 +952,15 @@ function App() {
                     background: hexA(card.bgColor, card.bgOpacity), backdropFilter: 'blur(6px)',
                     borderTop: `${card.borderWidth}px solid ${card.accentColor}`,
                   }}>
-                  {(card.fields.category || card.fields.date) && (
+                  {currentNews.type !== 'info' && (card.fields.category || card.fields.date) && (
                     <div className="flex items-center justify-between" style={{ marginBottom: 8 }}>
                       {card.fields.category ? <span className="tag" style={{ backgroundColor: getCategoryColor(currentNews.category) + '30', color: getCategoryColor(currentNews.category) }}>{currentNews.category.toUpperCase()}</span> : <span />}
                       {card.fields.date && <span className="text-[10px] text-slate-500 font-mono">{currentNews.date}</span>}
                     </div>
                   )}
                   <h3 style={{ color: card.titleColor, fontFamily: FONT_FAMILY[card.titleFont], fontSize: card.titleSize, fontWeight: 700 }}>{currentNews.title}</h3>
-                  {card.fields.body && <p style={{ color: card.textColor, fontSize: card.textSize }} className="line-clamp-4">{currentNews.text}</p>}
-                  {(card.fields.nation || card.fields.source) && (
+                  {(currentNews.type === 'info' || card.fields.body) && <p style={{ color: card.textColor, fontSize: card.textSize }} className="line-clamp-4">{currentNews.text}</p>}
+                  {currentNews.type !== 'info' && (card.fields.nation || card.fields.source) && (
                     <div className="flex items-center justify-between text-[10px] pt-2.5 border-t border-white/10">
                       {card.fields.nation ? <span className="flex items-center gap-1 text-slate-400"><MapPin className="w-3 h-3" /> {currentNews.nation}</span> : <span />}
                       {card.fields.source && <span className="font-mono text-slate-500">{currentNews.source}</span>}
@@ -794,7 +975,10 @@ function App() {
               </div>
             )}
           </div>
-          <div className="mt-3 text-[10px] text-slate-600">Clicca i pin • trascina per riordinare</div>
+          </div>
+          <Timeline news={news} currentIndex={currentIndex} settings={settings} accent={accent}
+            onSelect={selectNews} onReorder={setNews} onAddInfo={openAddInfo} onAddNews={openAddModal}
+            onSetDuration={setClipDuration} getCategoryColor={getCategoryColor} fmtSec={fmtSec} />
         </div>
 
         {/* RIGHT — tabbed controls */}
@@ -848,10 +1032,10 @@ function App() {
                 <div>
                   <div className="uppercase tracking-wider text-[11px] font-semibold text-slate-400 mb-3">Esporta</div>
                   <div className="space-y-2">
-                    <button onClick={exportVideo} disabled={isExporting || news.length === 0} className="w-full flex items-center justify-center gap-2 py-3.5 rounded-2xl bg-white text-black font-semibold text-sm disabled:bg-slate-700 disabled:text-slate-400">{isExporting ? <>⏳ REGISTRAZIONE...</> : <><Download className="w-4 h-4" /> VIDEO REEL ({VIDEO_EXT})</>}</button>
+                    <button onClick={exportVideo} disabled={isExporting || news.length === 0} className="w-full flex items-center justify-center gap-2 py-3.5 rounded-2xl bg-white text-black font-semibold text-sm disabled:bg-slate-700 disabled:text-slate-400">{isExporting ? <>⏳ RENDERING…</> : <><Download className="w-4 h-4" /> {HQ_AVAILABLE ? 'VIDEO HQ (MP4)' : `VIDEO (${VIDEO_EXT})`}</>}</button>
                     <button onClick={exportPNG} disabled={!currentNews} className="w-full flex items-center justify-center gap-2 py-3 text-sm rounded-2xl border border-slate-800 hover:bg-slate-800 disabled:opacity-40"><ImageIcon className="w-4 h-4" /> COVER PNG</button>
                   </div>
-                  <div className="mt-3 text-[10px] leading-snug text-slate-600">Card impressa nel video • {VIDEO_EXT === 'MP4' ? 'MP4 nativo ✓' : 'WEBM — converti su CloudConvert se serve'}</div>
+                  <div className="mt-3 text-[10px] leading-snug text-slate-600">{HQ_AVAILABLE ? 'Render frame-by-frame (WebCodecs) — fluido, non è una cattura schermo.' : 'WEBM via cattura schermo — converti su CloudConvert se serve.'}</div>
                 </div>
               </>
             )}
@@ -965,11 +1149,12 @@ function App() {
         <div className="fixed inset-0 bg-black/90 z-[100] flex items-center justify-center p-6" onClick={closeModal}>
           <motion.div initial={{ opacity: 0, scale: 0.96 }} animate={{ opacity: 1, scale: 1 }} className="modal w-full max-w-lg bg-slate-900 rounded-2xl overflow-hidden border border-slate-700" onClick={e => e.stopPropagation()}>
             <div className="px-7 pt-7 pb-5">
-              <div className="flex items-center justify-between mb-5"><div className="text-xl font-semibold">{editingNews ? 'Modifica Notizia' : 'Nuova Notizia'}</div><button onClick={closeModal} className="text-slate-400 hover:text-white">✕</button></div>
+              <div className="flex items-center justify-between mb-5"><div className="text-xl font-semibold">{editingNews ? 'Modifica' : 'Nuova'} {formData.type === 'info' ? 'Card Info' : 'Notizia'}</div><button onClick={closeModal} className="text-slate-400 hover:text-white">✕</button></div>
               {formError && <div className="mb-4 px-4 py-2.5 rounded-xl bg-red-950/60 border border-red-800/50 text-red-400 text-sm">{formError}</div>}
               <div className="space-y-4">
                 <Field label="Titolo"><input type="text" value={formData.title} onChange={(e) => setFormData({ ...formData, title: e.target.value })} placeholder="Es: Accordo commerciale UE-ASEAN" className="inp" /></Field>
                 <Field label="Descrizione breve"><textarea value={formData.text} onChange={(e) => setFormData({ ...formData, text: e.target.value })} rows={3} placeholder="Riassunto conciso..." className="inp resize-y min-h-[72px]" /></Field>
+                {formData.type !== 'info' && <>
                 <div className="grid grid-cols-2 gap-4">
                   <Field label="Categoria"><select value={formData.category} onChange={(e) => setFormData({ ...formData, category: e.target.value })} className="inp">{CATEGORY_OPTIONS.map(c => <option key={c} value={c}>{c}</option>)}</select></Field>
                   <Field label="Data"><input type="date" value={formData.date} onChange={(e) => setFormData({ ...formData, date: e.target.value })} className="inp" /></Field>
@@ -981,10 +1166,12 @@ function App() {
                 <div>
                   <div className="flex items-center justify-between mb-1.5"><label className="text-xs text-slate-400">Posizione geografica</label><button type="button" onClick={() => setIsPickingLocation(true)} className="text-xs flex items-center gap-1" style={{ color: accent }}><MapPin className="w-3.5 h-3.5" /> Seleziona sul globo</button></div>
                   <div className="grid grid-cols-2 gap-3">
-                    <input type="number" step="0.0001" value={formData.lat} onChange={(e) => setFormData({ ...formData, lat: parseFloat(e.target.value) || 0 })} className="inp font-mono" placeholder="Lat" />
-                    <input type="number" step="0.0001" value={formData.lng} onChange={(e) => setFormData({ ...formData, lng: parseFloat(e.target.value) || 0 })} className="inp font-mono" placeholder="Lng" />
+                    <input type="number" step="0.0001" value={formData.lat ?? ''} onChange={(e) => setFormData({ ...formData, lat: parseFloat(e.target.value) || 0 })} className="inp font-mono" placeholder="Lat" />
+                    <input type="number" step="0.0001" value={formData.lng ?? ''} onChange={(e) => setFormData({ ...formData, lng: parseFloat(e.target.value) || 0 })} className="inp font-mono" placeholder="Lng" />
                   </div>
                 </div>
+                </>}
+                {formData.type === 'info' && <div className="text-[11px] text-slate-500 bg-slate-800/40 rounded-xl px-4 py-3">Le card info non si spostano sul globo: la camera resta ferma sulla posizione precedente. Stile e font si regolano dalla tab <span className="text-slate-300">Card</span>.</div>}
               </div>
             </div>
             <div className="bg-slate-950 px-7 py-4 flex gap-3 border-t border-slate-700">
@@ -997,7 +1184,16 @@ function App() {
 
       {isExporting && (
         <div className="fixed inset-0 bg-black/95 z-[200] flex items-center justify-center">
-          <div className="text-center"><div className="mx-auto w-16 h-16 border-4 border-t-transparent rounded-full animate-spin mb-6" style={{ borderColor: accent, borderTopColor: 'transparent' }} /><div className="text-2xl font-semibold mb-2">Registrazione Reel...</div><div className="text-slate-400 text-sm">Non chiudere • ~{Math.ceil(news.length * settings.holdMs / 1000)}s</div></div>
+          <div className="text-center w-72">
+            <div className="mx-auto w-16 h-16 border-4 border-t-transparent rounded-full animate-spin mb-6" style={{ borderColor: accent, borderTopColor: 'transparent' }} />
+            <div className="text-2xl font-semibold mb-2">Rendering Reel…</div>
+            {exportPct > 0 ? (
+              <>
+                <div className="h-2 rounded-full bg-slate-800 overflow-hidden mb-2"><div className="h-full rounded-full transition-all" style={{ width: `${exportPct}%`, background: accent }} /></div>
+                <div className="text-slate-400 text-sm font-mono">{exportPct}% • rendering frame-by-frame</div>
+              </>
+            ) : <div className="text-slate-400 text-sm">Non chiudere la finestra</div>}
+          </div>
         </div>
       )}
 
@@ -1014,6 +1210,71 @@ function App() {
           </motion.div>
         </div>
       )}
+    </div>
+  );
+}
+
+function Timeline({ news, currentIndex, settings, accent, onSelect, onReorder, onAddInfo, onAddNews, onSetDuration, getCategoryColor, fmtSec }) {
+  const sel = news[currentIndex] || null;
+  const clipMs = (n) => n?.duration || settings.holdMs;
+  const totalMs = settings.introMs + news.reduce((a, n) => a + clipMs(n), 0) + (settings.outroType !== 'none' ? settings.outroMs : 0);
+  const widthFor = (n) => Math.max(64, Math.min(170, 64 + (clipMs(n) / 1000) * 26));
+  return (
+    <div className="border-t border-slate-800/80 bg-slate-950/80 backdrop-blur px-4 py-3">
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-2 text-[11px] uppercase tracking-wider font-semibold text-slate-400">
+          <Route className="w-3.5 h-3.5" /> Percorso reel
+          <span className="text-slate-600 normal-case font-mono lowercase">· {fmtSec(totalMs)} totali</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <button onClick={onAddNews} className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px]" style={{ color: accent }}><MapPin className="w-3 h-3" /> Notizia</button>
+          <button onClick={onAddInfo} className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] text-slate-300"><Type className="w-3 h-3" /> Info</button>
+        </div>
+      </div>
+
+      {sel && (
+        <div className="flex items-center gap-3 mb-2.5 px-1">
+          <Clock className="w-3.5 h-3.5 text-slate-500 flex-shrink-0" />
+          <span className="text-[11px] text-slate-400 flex-shrink-0">Durata clip</span>
+          <input type="range" min={1000} max={8000} step={250} value={clipMs(sel)} onChange={(e) => onSetDuration(sel.id, Number(e.target.value))} className="flex-1" />
+          <span className="text-[11px] font-mono text-slate-300 w-10 text-right flex-shrink-0">{fmtSec(clipMs(sel))}</span>
+          {sel.duration && <button onClick={() => onSetDuration(sel.id, undefined)} className="text-[10px] text-slate-500 hover:text-slate-300 flex-shrink-0">auto</button>}
+        </div>
+      )}
+
+      <div className="flex items-stretch gap-1.5 overflow-x-auto pb-1">
+        <div className="flex flex-col items-center justify-center px-2.5 rounded-lg bg-slate-900 border border-slate-800 flex-shrink-0">
+          <div className="text-[8px] uppercase tracking-wider text-slate-500">Start</div>
+          <div className="text-[10px] font-mono text-slate-300">{settings.startLat.toFixed(0)},{settings.startLng.toFixed(0)}</div>
+          {settings.introMs > 0 && <div className="text-[8px] text-slate-600">+{fmtSec(settings.introMs)}</div>}
+        </div>
+        <Reorder.Group axis="x" values={news} onReorder={onReorder} className="flex items-stretch gap-1.5">
+          {news.map((item, index) => {
+            const isInfo = item.type === 'info';
+            const active = index === currentIndex;
+            const col = isInfo ? '#64748b' : getCategoryColor(item.category);
+            return (
+              <Reorder.Item key={item.id} value={item} whileDrag={{ scale: 1.04 }}
+                onClick={() => onSelect(index)}
+                style={{ width: widthFor(item) }}
+                className={`relative flex flex-col justify-between p-2 rounded-lg cursor-grab active:cursor-grabbing border flex-shrink-0 transition-colors ${active ? 'bg-slate-800 border-slate-700' : 'bg-slate-900 hover:bg-slate-800 border-slate-800'}`}>
+                <div className="absolute inset-0 rounded-lg pointer-events-none" style={active ? { boxShadow: `inset 0 0 0 1.5px ${accent}` } : {}} />
+                <div className="flex items-center gap-1.5">
+                  {isInfo ? <Type className="w-2.5 h-2.5 flex-shrink-0" style={{ color: col }} /> : <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: col }} />}
+                  <span className="text-[9px] font-mono text-slate-500">{index + 1}</span>
+                </div>
+                <div className="text-[10px] leading-tight text-slate-200 line-clamp-2 mt-1">{item.title}</div>
+                <div className="text-[8px] font-mono text-slate-500 mt-1">{fmtSec(clipMs(item))}</div>
+              </Reorder.Item>
+            );
+          })}
+        </Reorder.Group>
+        <div className="flex flex-col items-center justify-center px-2.5 rounded-lg bg-slate-900 border border-slate-800 flex-shrink-0">
+          <div className="text-[8px] uppercase tracking-wider text-slate-500">End</div>
+          <div className="text-[10px] text-slate-400">{settings.outroType === 'fade' ? 'Fade' : settings.outroType === 'hold' ? 'Hold' : '—'}</div>
+          {settings.outroType !== 'none' && <div className="text-[8px] text-slate-600">+{fmtSec(settings.outroMs)}</div>}
+        </div>
+      </div>
     </div>
   );
 }

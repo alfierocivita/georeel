@@ -13,6 +13,7 @@
     "framer-motion": "^11.11.0",
     "globe.gl": "^2.33.1",
     "lucide-react": "^0.408.0",
+    "mediabunny": "^1.46.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
     "three": "^0.167.1",
