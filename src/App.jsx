@@ -179,6 +179,30 @@ const lerp = (a, b, t) => a + (b - a) * t;
 const lerpLng = (a, b, t) => { const d = ((b - a + 540) % 360) - 180; return a + d * t; };
 const easeInOut = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
 
+// Slow "satellite filming" orbit applied while the camera holds over a target.
+// intensity 0..1 → subtle, slow, never fully stops. Deterministic from holdMs.
+const driftPov = (base, holdMs, intensity) => {
+  if (!intensity || intensity <= 0) return base;
+  const amp = intensity * 2.4; // degrees of sway at 100%
+  return {
+    lat: base.lat + amp * 0.6 * Math.sin(holdMs * 0.00045),
+    lng: base.lng + amp * Math.cos(holdMs * 0.00034),
+    alt: base.alt * (1 + intensity * 0.035 * Math.sin(holdMs * 0.00028)),
+  };
+};
+
+// Living clouds: rotate + gentle wobble + breathing opacity/scale (subtle 3D depth).
+// Deterministic from a time in ms so preview and export stay smooth.
+const animateCloud = (mesh, baseOpacity, speed, ms) => {
+  if (!mesh) return;
+  mesh.rotation.y = ms * 0.0000075 * (speed ?? 0.5) * 12;
+  mesh.rotation.x = Math.sin(ms * 0.000045) * 0.025;
+  const pulse = 1 + Math.sin(ms * 0.00019) * 0.14;
+  mesh.material.opacity = baseOpacity * pulse;
+  const sc = 1 + Math.sin(ms * 0.00013) * 0.005;
+  mesh.scale.setScalar(sc);
+};
+
 // Builds time→camera + time→active-card lookup. Mirrors live cinematicTo().
 function buildStoryboard(clips, st, cardTransMs) {
   const start = { lat: st.startLat, lng: st.startLng, alt: st.startAlt };
@@ -206,14 +230,8 @@ function buildStoryboard(clips, st, cardTransMs) {
     const local = tms - s.t0, fly = s.flyMs, { from, to } = s;
     const flyEnd = fly * 1.05;
     if (local >= flyEnd && drift > 0) {
-      // Hold phase — satellite drift (slow sinusoidal orbit)
-      const holdMs = local - flyEnd;
-      const amp = drift * 0.45;
-      return {
-        lat: to.lat + amp * Math.sin(holdMs * 0.00091),
-        lng: to.lng + amp * Math.cos(holdMs * 0.00073),
-        alt: to.alt,
-      };
+      // Hold phase — slow satellite orbit so the shot never fully freezes
+      return driftPov(to, local - flyEnd, drift);
     }
     const llP = Math.min(1, local / (fly * 0.45)), e = easeInOut(llP);
     const lat = lerp(from.lat, to.lat, e);
@@ -286,11 +304,13 @@ function App() {
   const outroRef = useRef({ active: false, start: 0, dur: 0, type: 'none' });
 
   const pickingRef = useRef(false);
+  const exportingRef = useRef(false);
+  const holdRef = useRef({ active: false, lat: 0, lng: 0, alt: 1, t0: 0 });
   const newsRef = useRef(news);
   const settingsRef = useRef(settings);
   const themeRef = useRef(theme);
   const currentNewsRef = useRef(news[0] || null);
-  const playState = useRef({ playing: false, slideTimer: null, zoomTimer: null });
+  const playState = useRef({ playing: false, slideTimer: null, zoomTimer: null, driftTimer: null });
 
   useEffect(() => { newsRef.current = news; }, [news]);
   useEffect(() => { settingsRef.current = settings; }, [settings]);
@@ -412,24 +432,30 @@ function App() {
     globe.scene().add(overlayMesh);
     overlayRef.current = overlayMesh;
 
-    // Cloud layer (real NASA cloud texture, slow independent rotation)
-    const st0 = themeRef.current;
+    // Cloud layer — sits a bit higher than the surface for parallax depth.
+    // bumpMap gives the clouds real 3D relief; animateCloud makes them live & breathe.
+    const st0 = settingsRef.current;
     const cloudTex = new THREE.TextureLoader().load('/textures/earth-clouds.png');
-    const cloudGeo = new THREE.SphereGeometry(101.5, 48, 48);
+    const cloudGeo = new THREE.SphereGeometry(103, 64, 64);
     const cloudMat = new THREE.MeshPhongMaterial({
-      map: cloudTex, alphaMap: cloudTex, transparent: true,
-      opacity: st0.cloudOpacity ?? 0.25, depthWrite: false,
+      map: cloudTex, alphaMap: cloudTex, bumpMap: cloudTex, bumpScale: 1.4,
+      transparent: true, opacity: st0.cloudOpacity ?? 0.25,
+      depthWrite: false, shininess: 4,
     });
     const cloudMesh = new THREE.Mesh(cloudGeo, cloudMat);
     cloudMesh.visible = !!(st0.showClouds);
     cloudMesh.renderOrder = 4;
+    cloudMesh.userData.baseOpacity = st0.cloudOpacity ?? 0.25;
     globe.scene().add(cloudMesh);
     cloudRef.current = cloudMesh;
 
-    // Cloud auto-rotation (driven by RAF via globe.gl's internal loop)
+    // Living-cloud animation (preview). Export drives it deterministically per-frame.
     let cloudRafId;
     const rotateCloud = () => {
-      if (cloudRef.current) cloudRef.current.rotation.y += 0.0001 * (settingsRef.current.cloudSpeed ?? 0.5);
+      const m = cloudRef.current;
+      if (m && m.visible && !exportingRef.current) {
+        animateCloud(m, m.userData.baseOpacity ?? 0.25, settingsRef.current.cloudSpeed ?? 0.5, nowMs());
+      }
       cloudRafId = requestAnimationFrame(rotateCloud);
     };
     cloudRafId = requestAnimationFrame(rotateCloud);
@@ -533,10 +559,27 @@ function App() {
     const cloud = cloudRef.current;
     if (!cloud) return;
     cloud.visible = !!settings.showClouds;
+    cloud.userData.baseOpacity = settings.cloudOpacity ?? 0.25;
     cloud.material.opacity = settings.cloudOpacity ?? 0.25;
   }, [settings.showClouds, settings.cloudOpacity]);
+  // Preview satellite drift — slow orbit while the camera holds over a target
+  useEffect(() => {
+    if (!settings.driftIntensity || settings.driftIntensity <= 0) return;
+    let raf;
+    const tick = () => {
+      const g = globeInstance.current;
+      const h = holdRef.current;
+      if (g && h.active && playState.current.playing) {
+        const pov = driftPov({ lat: h.lat, lng: h.lng, alt: h.alt }, nowMs() - h.t0, settingsRef.current.driftIntensity);
+        g.pointOfView(pov, 0);
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [settings.driftIntensity]);
 
-  useEffect(() => () => { clearTimeout(playState.current.slideTimer); clearTimeout(playState.current.zoomTimer); }, []);
+  useEffect(() => () => { clearTimeout(playState.current.slideTimer); clearTimeout(playState.current.zoomTimer); clearTimeout(playState.current.driftTimer); }, []);
 
   const getCategoryColor = (c) => CATEGORY_COLORS[c] || '#64748b';
 
@@ -545,10 +588,23 @@ function App() {
     if (!list.length) { stopPreview(); return; }
     const idx = ((i % list.length) + list.length) % list.length;
     const c = themeRef.current.card;
+    const s = settingsRef.current;
     cardTransRef.current = { active: true, start: nowMs(), dur: c.transitionMs ?? 350, type: c.transitionType ?? 'slide' };
     setCurrentIndex(idx);
-    cinematicTo(list[idx]);
-    const dur = list[idx].duration || settingsRef.current.holdMs;
+    const item = list[idx];
+    cinematicTo(item);
+    // Arm satellite drift once the dolly-in settles (geo clips hold over the target;
+    // info clips keep drifting around the previous position).
+    holdRef.current = { ...holdRef.current, active: false };
+    clearTimeout(playState.current.driftTimer);
+    playState.current.driftTimer = setTimeout(() => {
+      if (!playState.current.playing) return;
+      const base = hasGeo(item)
+        ? { lat: item.lat, lng: item.lng, alt: s.altitude }
+        : (globeInstance.current?.pointOfView() || holdRef.current);
+      holdRef.current = { active: true, lat: base.lat, lng: base.lng, alt: base.alt, t0: nowMs() };
+    }, Math.max(350, s.flyMs * 0.6) + s.flyMs * 0.45);
+    const dur = item.duration || s.holdMs;
     playState.current.slideTimer = setTimeout(() => { if (playState.current.playing) playStep(idx + 1); }, dur);
   };
   const startPreview = () => {
@@ -561,7 +617,9 @@ function App() {
   const stopPreview = () => {
     clearTimeout(playState.current.slideTimer);
     clearTimeout(playState.current.zoomTimer);
-    playState.current = { playing: false, slideTimer: null, zoomTimer: null };
+    clearTimeout(playState.current.driftTimer);
+    holdRef.current = { ...holdRef.current, active: false };
+    playState.current = { playing: false, slideTimer: null, zoomTimer: null, driftTimer: null };
     setIsPlaying(false);
     if (globeInstance.current) globeInstance.current.controls().autoRotate = settingsRef.current.autoSpin;
   };
@@ -758,24 +816,31 @@ function App() {
     g.renderer().render(g.scene(), cam);
   };
 
-  // Deterministic frame-by-frame export via WebCodecs (smooth, not a screen grab)
+  // Deterministic frame-by-frame export via WebCodecs (smooth, not a screen grab).
+  // Renders at the highest 9:16 resolution the encoder accepts (up to 4K = 2160×3840).
   const exportVideoHQ = async () => {
     const g = getGlobeCanvas();
     if (!g) { showToast('Globo non pronto', 'error'); return; }
     const clips = newsRef.current;
     if (!clips.length) { showToast('Aggiungi almeno una clip', 'error'); return; }
     const st = settingsRef.current;
-    const W = g.width, H = g.height, s = W / 360;
     const fps = 60;
-    const comp = document.createElement('canvas'); comp.width = W; comp.height = H;
-    const ctx = comp.getContext('2d');
 
+    // Pick the highest 9:16 resolution the browser can actually encode.
     const codecPref = ['avc', 'hevc', 'av1', 'vp9'];
-    let codec = null;
-    try { codec = await getFirstEncodableVideoCodec(codecPref, { width: W, height: H }); } catch { /* ignore */ }
+    const RES_LADDER = [[2160, 3840], [1440, 2560], [1080, 1920], [720, 1280]];
+    let W = 0, H = 0, codec = null;
+    for (const [w, h] of RES_LADDER) {
+      let c = null;
+      try { c = await getFirstEncodableVideoCodec(codecPref, { width: w, height: h }); } catch { /* ignore */ }
+      if (c) { W = w; H = h; codec = c; break; }
+    }
     if (!codec) { showToast('WebCodecs non disponibile, uso cattura schermo', 'error'); return exportVideoCapture(); }
+    const s = W / 360;
     const isMp4 = codec === 'avc' || codec === 'hevc' || codec === 'av1';
     const ext = isMp4 ? 'mp4' : 'webm';
+    const comp = document.createElement('canvas'); comp.width = W; comp.height = H;
+    const ctx = comp.getContext('2d');
 
     const output = new Output({
       format: isMp4 ? new Mp4OutputFormat({ fastStart: 'in-memory' }) : new WebMOutputFormat(),
@@ -786,16 +851,32 @@ function App() {
 
     stopPreview();
     setIsExporting(true);
+    exportingRef.current = true;
     setExportPct(0);
     const gInst = globeInstance.current;
     const ctrl = gInst?.controls();
     const prevAuto = ctrl?.autoRotate;
     if (ctrl) { ctrl.autoRotate = false; ctrl.enabled = false; }
-    // Freeze arc animation during offline render
+
+    // Upscale the renderer to the export resolution (pixelRatio 1 → exact buffer size).
+    const prevW = gInst.width(), prevH = gInst.height();
+    const prevPR = gInst.renderer().getPixelRatio();
+    gInst.renderer().setPixelRatio(1);
+    gInst.width(W).height(H);
+
+    // Freeze auto-driven arc dash + polygon transitions; we drive them per-frame instead.
     const prevArcAnimTime = 1800;
-    gInst?.arcDashAnimateTime(0);
-    // Freeze polygon transitions so borders apply instantly
-    gInst?.polygonsTransitionDuration(0);
+    gInst.arcDashAnimateTime(0);
+    gInst.polygonsTransitionDuration(0);
+
+    // Collect arc shader materials so we can advance the dash deterministically.
+    const arcMats = [];
+    gInst.scene().traverse((o) => {
+      const u = o.material && o.material.uniforms;
+      if (u && u.dashTranslate) arcMats.push(o.material);
+    });
+    const cloud = cloudRef.current;
+    const cloudBase = cloud?.userData.baseOpacity ?? 0.25;
 
     try {
       await output.start();
@@ -813,7 +894,7 @@ function App() {
         const item = clips[clip] || null;
         currentNewsRef.current = item;
 
-        // Update country border per-frame (deterministic, follows settings)
+        // Update country border per-clip (deterministic, follows settings exactly)
         if (clip !== lastClipIdx) {
           lastClipIdx = clip;
           if (th.showBorder && item && hasGeo(item)) {
@@ -831,6 +912,12 @@ function App() {
             gInst.polygonsData([]);
           }
         }
+
+        // Advance flowing arc dashes deterministically (no freeze, no jump)
+        const dashVal = tms / prevArcAnimTime;
+        for (const m of arcMats) m.uniforms.dashTranslate.value = dashVal;
+        // Living clouds, deterministic per frame
+        if (cloud && cloud.visible) animateCloud(cloud, cloudBase, st.cloudSpeed ?? 0.5, tms);
 
         setCameraPOV(pov);
         ctx.clearRect(0, 0, W, H);
@@ -854,21 +941,27 @@ function App() {
       await output.finalize();
       const blob = new Blob([output.target.buffer], { type: isMp4 ? 'video/mp4' : 'video/webm' });
       const url = URL.createObjectURL(blob);
-      const a = document.createElement('a'); a.href = url; a.download = `GeoReel_${new Date().toISOString().slice(0, 10)}.${ext}`; a.click();
+      const a = document.createElement('a'); a.href = url; a.download = `GeoReel_${H >= 3840 ? '4K_' : ''}${new Date().toISOString().slice(0, 10)}.${ext}`; a.click();
       URL.revokeObjectURL(url);
-      showToast('Video esportato ✓');
+      showToast(`Video ${H}p esportato ✓`);
     } catch (err) {
       console.error(err);
       showToast('Errore export, uso cattura schermo', 'error');
-      gInst?.arcDashAnimateTime(prevArcAnimTime);
-      gInst?.polygonsTransitionDuration(400);
+      gInst.width(prevW).height(prevH); gInst.renderer().setPixelRatio(prevPR);
+      gInst.arcDashAnimateTime(prevArcAnimTime);
+      gInst.polygonsTransitionDuration(400);
       if (ctrl) { ctrl.autoRotate = prevAuto; ctrl.enabled = true; }
+      exportingRef.current = false;
       setIsExporting(false); setExportPct(0);
       return exportVideoCapture();
     }
-    gInst?.arcDashAnimateTime(prevArcAnimTime);
-    gInst?.polygonsTransitionDuration(400);
+    // Restore preview resolution & live animation
+    gInst.width(prevW).height(prevH); gInst.renderer().setPixelRatio(prevPR);
+    gInst.arcDashAnimateTime(prevArcAnimTime);
+    gInst.polygonsTransitionDuration(400);
+    if (cloud) cloud.material.opacity = cloudBase;
     if (ctrl) { ctrl.autoRotate = prevAuto; ctrl.enabled = true; }
+    exportingRef.current = false;
     setIsExporting(false); setExportPct(0);
     stopPreview();
   };
@@ -1120,10 +1213,10 @@ function App() {
                 <div>
                   <div className="uppercase tracking-wider text-[11px] font-semibold text-slate-400 mb-3">Esporta</div>
                   <div className="space-y-2">
-                    <button onClick={exportVideo} disabled={isExporting || news.length === 0} className="w-full flex items-center justify-center gap-2 py-3.5 rounded-2xl bg-white text-black font-semibold text-sm disabled:bg-slate-700 disabled:text-slate-400">{isExporting ? <>⏳ RENDERING…</> : <><Download className="w-4 h-4" /> {HQ_AVAILABLE ? 'VIDEO HQ (MP4)' : `VIDEO (${VIDEO_EXT})`}</>}</button>
+                    <button onClick={exportVideo} disabled={isExporting || news.length === 0} className="w-full flex items-center justify-center gap-2 py-3.5 rounded-2xl bg-white text-black font-semibold text-sm disabled:bg-slate-700 disabled:text-slate-400">{isExporting ? <>⏳ RENDERING…</> : <><Download className="w-4 h-4" /> {HQ_AVAILABLE ? 'VIDEO 4K (MP4)' : `VIDEO (${VIDEO_EXT})`}</>}</button>
                     <button onClick={exportPNG} disabled={!currentNews} className="w-full flex items-center justify-center gap-2 py-3 text-sm rounded-2xl border border-slate-800 hover:bg-slate-800 disabled:opacity-40"><ImageIcon className="w-4 h-4" /> COVER PNG</button>
                   </div>
-                  <div className="mt-3 text-[10px] leading-snug text-slate-600">{HQ_AVAILABLE ? 'Render frame-by-frame (WebCodecs) — fluido, non è una cattura schermo.' : 'WEBM via cattura schermo — converti su CloudConvert se serve.'}</div>
+                  <div className="mt-3 text-[10px] leading-snug text-slate-600">{HQ_AVAILABLE ? 'Render frame-by-frame fino a 4K (2160×3840) — fluido, non è una cattura schermo.' : 'WEBM via cattura schermo — converti su CloudConvert se serve.'}</div>
                 </div>
               </>
             )}
