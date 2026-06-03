@@ -7,8 +7,9 @@ import { motion, Reorder } from 'framer-motion';
 import { Output, Mp4OutputFormat, WebMOutputFormat, BufferTarget, CanvasSource, QUALITY_HIGH, getFirstEncodableVideoCodec } from 'mediabunny';
 import {
   Play, Pause, Download, Image as ImageIcon, Plus, Trash2, Edit2,
-  MapPin, RotateCcw, Globe as GlobeIcon, Route, Grid3x3, Layers, Type, Clock
+  MapPin, RotateCcw, Globe as GlobeIcon, Route, Grid3x3, Layers, Type, Clock, Cloud
 } from 'lucide-react';
+import { searchCountries } from './country-centroids.js';
 
 const CATEGORY_COLORS = {
   'Economia': '#22c55e',
@@ -198,10 +199,22 @@ function buildStoryboard(clips, st, cardTransMs) {
   if (hasOutro) { segs.push({ t0: t, t1: t + st.outroMs, kind: 'outro', cam: prev, clip: clips.length - 1, animate: false }); total += st.outroMs; }
 
   const segAt = (tms) => segs.find(s => tms >= s.t0 && tms < s.t1) || segs[segs.length - 1];
+  const drift = st.driftIntensity ?? 0;
   const povAt = (tms) => {
     const s = segAt(tms);
     if (s.kind !== 'clip') return s.cam;
     const local = tms - s.t0, fly = s.flyMs, { from, to } = s;
+    const flyEnd = fly * 1.05;
+    if (local >= flyEnd && drift > 0) {
+      // Hold phase — satellite drift (slow sinusoidal orbit)
+      const holdMs = local - flyEnd;
+      const amp = drift * 0.45;
+      return {
+        lat: to.lat + amp * Math.sin(holdMs * 0.00091),
+        lng: to.lng + amp * Math.cos(holdMs * 0.00073),
+        alt: to.alt,
+      };
+    }
     const llP = Math.min(1, local / (fly * 0.45)), e = easeInOut(llP);
     const lat = lerp(from.lat, to.lat, e);
     const lng = lerpLng(from.lng, to.lng, e);
@@ -239,6 +252,8 @@ function App() {
   const [isPickingLocation, _setIsPickingLocation] = useState(false);
   const [tab, setTab] = useState('preview'); // preview | planet | card
   const [formData, setFormData] = useState({ title: '', text: '', category: 'Conflitto', date: '', source: '', nation: '', lat: 41.9, lng: 12.5 });
+  const [countryQuery, setCountryQuery] = useState('');
+  const [countrySuggestions, setCountrySuggestions] = useState([]);
 
   const [theme, setTheme] = useState(() => {
     try {
@@ -252,7 +267,7 @@ function App() {
   });
 
   const [settings, setSettings] = useState(() => {
-    const defaults = { holdMs: 3000, flyMs: 1200, altitude: 0.9, startLat: 20, startLng: 10, startAlt: 2.4, introMs: 800, outroType: 'hold', outroMs: 1500, autoSpin: true };
+    const defaults = { holdMs: 3000, flyMs: 1200, altitude: 0.9, startLat: 20, startLng: 10, startAlt: 2.4, introMs: 800, outroType: 'hold', outroMs: 1500, autoSpin: true, driftIntensity: 0, showClouds: false, cloudOpacity: 0.25, cloudSpeed: 0.5 };
     try { const s = localStorage.getItem('georeel-settings-v1'); if (s) return { ...defaults, ...JSON.parse(s) }; } catch { /* ignore */ }
     return defaults;
   });
@@ -265,6 +280,7 @@ function App() {
   const globeInstance = useRef(null);
   const gridRef = useRef(null);
   const overlayRef = useRef(null);
+  const cloudRef = useRef(null);
   const countryCache = useRef({});
   const cardTransRef = useRef({ active: false, start: 0, dur: 350, type: 'slide' });
   const outroRef = useRef({ active: false, start: 0, dur: 0, type: 'none' });
@@ -395,14 +411,39 @@ function App() {
     overlayMesh.renderOrder = 2;
     globe.scene().add(overlayMesh);
     overlayRef.current = overlayMesh;
+
+    // Cloud layer (real NASA cloud texture, slow independent rotation)
+    const st0 = themeRef.current;
+    const cloudTex = new THREE.TextureLoader().load('/textures/earth-clouds.png');
+    const cloudGeo = new THREE.SphereGeometry(101.5, 48, 48);
+    const cloudMat = new THREE.MeshPhongMaterial({
+      map: cloudTex, alphaMap: cloudTex, transparent: true,
+      opacity: st0.cloudOpacity ?? 0.25, depthWrite: false,
+    });
+    const cloudMesh = new THREE.Mesh(cloudGeo, cloudMat);
+    cloudMesh.visible = !!(st0.showClouds);
+    cloudMesh.renderOrder = 4;
+    globe.scene().add(cloudMesh);
+    cloudRef.current = cloudMesh;
+
+    // Cloud auto-rotation (driven by RAF via globe.gl's internal loop)
+    let cloudRafId;
+    const rotateCloud = () => {
+      if (cloudRef.current) cloudRef.current.rotation.y += 0.0001 * (settingsRef.current.cloudSpeed ?? 0.5);
+      cloudRafId = requestAnimationFrame(rotateCloud);
+    };
+    cloudRafId = requestAnimationFrame(rotateCloud);
+
     setTimeout(enhanceTextures, 1200);
 
     return () => {
+      cancelAnimationFrame(cloudRafId);
       try { globe._destructor && globe._destructor(); } catch { /* ignore */ }
       if (globeEl.current) globeEl.current.innerHTML = '';
       globeInstance.current = null;
       gridRef.current = null;
       overlayRef.current = null;
+      cloudRef.current = null;
     };
   }, []);
 
@@ -487,6 +528,13 @@ function App() {
     overlay.material.color.set(theme.planetOverlayColor || '#000000');
     overlay.material.opacity = theme.planetOverlayOpacity ?? 0;
   }, [theme.planetOverlayColor, theme.planetOverlayOpacity]);
+  // Cloud layer
+  useEffect(() => {
+    const cloud = cloudRef.current;
+    if (!cloud) return;
+    cloud.visible = !!settings.showClouds;
+    cloud.material.opacity = settings.cloudOpacity ?? 0.25;
+  }, [settings.showClouds, settings.cloudOpacity]);
 
   useEffect(() => () => { clearTimeout(playState.current.slideTimer); clearTimeout(playState.current.zoomTimer); }, []);
 
@@ -522,17 +570,21 @@ function App() {
 
   // CRUD
   const openAddModal = () => {
-    setEditingNews(null); setFormError('');
+    setEditingNews(null); setFormError(''); setCountryQuery(''); setCountrySuggestions([]);
     setFormData({ title: '', text: '', category: 'Conflitto', date: todayISO(), source: '', nation: '', lat: 41.9028, lng: 12.4964 });
     setShowModal(true); setIsPickingLocation(false);
   };
   const openAddInfo = () => {
-    setEditingNews(null); setFormError('');
+    setEditingNews(null); setFormError(''); setCountryQuery(''); setCountrySuggestions([]);
     setFormData({ title: 'Titolo info', text: 'Testo descrittivo aggiuntivo…', type: 'info', category: 'Info', date: '', source: '', nation: '', lat: null, lng: null });
     setShowModal(true); setIsPickingLocation(false);
   };
-  const openEditModal = (item) => { setEditingNews(item); setFormError(''); setFormData({ ...item }); setShowModal(true); setIsPickingLocation(false); };
-  const closeModal = () => { setShowModal(false); setFormError(''); setIsPickingLocation(false); };
+  const openEditModal = (item) => {
+    setEditingNews(item); setFormError('');
+    setCountryQuery(item.nation || ''); setCountrySuggestions([]);
+    setFormData({ ...item }); setShowModal(true); setIsPickingLocation(false);
+  };
+  const closeModal = () => { setShowModal(false); setFormError(''); setIsPickingLocation(false); setCountryQuery(''); setCountrySuggestions([]); };
   const saveNews = () => {
     if (!formData.title.trim() || !formData.text.trim()) { setFormError('Titolo e descrizione sono obbligatori'); return; }
     const isInfo = formData.type === 'info';
@@ -735,16 +787,24 @@ function App() {
     stopPreview();
     setIsExporting(true);
     setExportPct(0);
-    const ctrl = globeInstance.current?.controls();
+    const gInst = globeInstance.current;
+    const ctrl = gInst?.controls();
     const prevAuto = ctrl?.autoRotate;
     if (ctrl) { ctrl.autoRotate = false; ctrl.enabled = false; }
+    // Freeze arc animation during offline render
+    const prevArcAnimTime = 1800;
+    gInst?.arcDashAnimateTime(0);
+    // Freeze polygon transitions so borders apply instantly
+    gInst?.polygonsTransitionDuration(0);
 
     try {
       await output.start();
-      const sb = buildStoryboard(clips, st, themeRef.current.card.transitionMs ?? 350);
+      const th = themeRef.current;
+      const sb = buildStoryboard(clips, st, th.card.transitionMs ?? 350);
       const totalFrames = Math.max(1, Math.ceil((sb.total / 1000) * fps));
-      const transType = themeRef.current.card.transitionType ?? 'slide';
+      const transType = th.card.transitionType ?? 'slide';
       const frameDur = 1 / fps;
+      let lastClipIdx = -1;
 
       for (let f = 0; f < totalFrames; f++) {
         const tms = (f / fps) * 1000;
@@ -752,6 +812,25 @@ function App() {
         const { clip, alpha, fadeBlack } = sb.cardAt(tms);
         const item = clips[clip] || null;
         currentNewsRef.current = item;
+
+        // Update country border per-frame (deterministic, follows settings)
+        if (clip !== lastClipIdx) {
+          lastClipIdx = clip;
+          if (th.showBorder && item && hasGeo(item)) {
+            const country = findCountryCached(countryCache, item.lat, item.lng);
+            if (country) {
+              gInst.polygonsData([country])
+                .polygonAltitude(0.006)
+                .polygonCapColor(() => hexA(th.borderColor, th.borderOpacity * 0.28))
+                .polygonSideColor(() => 'rgba(0,0,0,0)')
+                .polygonStrokeColor(() => hexA(th.borderColor, th.borderOpacity));
+            } else {
+              gInst.polygonsData([]);
+            }
+          } else {
+            gInst.polygonsData([]);
+          }
+        }
 
         setCameraPOV(pov);
         ctx.clearRect(0, 0, W, H);
@@ -781,10 +860,14 @@ function App() {
     } catch (err) {
       console.error(err);
       showToast('Errore export, uso cattura schermo', 'error');
+      gInst?.arcDashAnimateTime(prevArcAnimTime);
+      gInst?.polygonsTransitionDuration(400);
       if (ctrl) { ctrl.autoRotate = prevAuto; ctrl.enabled = true; }
       setIsExporting(false); setExportPct(0);
       return exportVideoCapture();
     }
+    gInst?.arcDashAnimateTime(prevArcAnimTime);
+    gInst?.polygonsTransitionDuration(400);
     if (ctrl) { ctrl.autoRotate = prevAuto; ctrl.enabled = true; }
     setIsExporting(false); setExportPct(0);
     stopPreview();
@@ -924,8 +1007,8 @@ function App() {
         </div>
 
         {/* CENTER — 9:16 */}
-        <div className="flex-1 flex flex-col bg-[#070b14] min-h-0 overflow-hidden">
-          <div className="flex-1 flex flex-col items-center justify-center min-h-0 px-4 pt-3 pb-2">
+        <div className="flex-1 flex flex-col bg-[#070b14] min-h-0 overflow-y-auto overflow-x-hidden">
+          <div className="flex flex-col items-center px-4 pt-4 pb-2">
           <div className="mb-2 flex items-center gap-2 text-xs">
             <div className="px-3 py-1 rounded-full bg-slate-900 flex items-center gap-2 border border-slate-800"><div className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: accent }} /> LIVE 9:16</div>
             <div className="text-slate-500 font-mono">720×1280</div>
@@ -1028,6 +1111,11 @@ function App() {
                   {settings.outroType !== 'none' && <Slider label="Durata outro" value={settings.outroMs} min={500} max={5000} step={250} display={fmtSec(settings.outroMs)} onChange={(v) => setSettings(s => ({ ...s, outroMs: v }))} />}
                 </div>
                 <Toggle wide active={theme.showCards} onClick={() => setTheme(t => ({ ...t, showCards: !t.showCards }))} icon={<Layers className="w-4 h-4" />} label={theme.showCards ? 'Card notizie: ON' : 'Solo punti (card OFF)'} accent={accent} />
+                <div className="space-y-4 bg-slate-900 rounded-2xl p-4">
+                  <Toggle wide active={settings.showClouds} onClick={() => setSettings(s => ({ ...s, showClouds: !s.showClouds }))} icon={<Cloud className="w-4 h-4" />} label={settings.showClouds ? 'Nuvole: ON' : 'Nuvole: OFF'} accent={accent} />
+                  {settings.showClouds && <Slider label="Opacità nuvole" value={Math.round((settings.cloudOpacity ?? 0.25) * 100)} min={5} max={80} step={5} display={`${Math.round((settings.cloudOpacity ?? 0.25) * 100)}%`} onChange={(v) => setSettings(s => ({ ...s, cloudOpacity: v / 100 }))} />}
+                  <Slider label="Drift satellite (fermo)" value={Math.round((settings.driftIntensity ?? 0) * 100)} min={0} max={100} step={5} display={settings.driftIntensity > 0 ? `${Math.round((settings.driftIntensity ?? 0) * 100)}%` : 'Off'} onChange={(v) => setSettings(s => ({ ...s, driftIntensity: v / 100 }))} />
+                </div>
                 <button onClick={resetCamera} className="w-full py-2.5 text-xs rounded-2xl border border-slate-800 hover:bg-slate-800 flex items-center justify-center gap-2"><RotateCcw className="w-3.5 h-3.5" /> RESET CAMERA</button>
                 <div>
                   <div className="uppercase tracking-wider text-[11px] font-semibold text-slate-400 mb-3">Esporta</div>
@@ -1160,11 +1248,44 @@ function App() {
                   <Field label="Data"><input type="date" value={formData.date} onChange={(e) => setFormData({ ...formData, date: e.target.value })} className="inp" /></Field>
                 </div>
                 <div className="grid grid-cols-2 gap-4">
-                  <Field label="Nazione / Regione"><input type="text" value={formData.nation} onChange={(e) => setFormData({ ...formData, nation: e.target.value })} placeholder="Ucraina" className="inp" /></Field>
+                  <div>
+                    <label className="text-xs text-slate-400 block mb-1.5">Paese</label>
+                    <div className="relative">
+                      <input
+                        type="text"
+                        value={countryQuery}
+                        onChange={(e) => {
+                          const q = e.target.value;
+                          setCountryQuery(q);
+                          setCountrySuggestions(q.length >= 2 ? searchCountries(q) : []);
+                          setFormData(prev => ({ ...prev, nation: q }));
+                        }}
+                        placeholder="Es: Italia, France…"
+                        className="inp w-full"
+                        autoComplete="off"
+                      />
+                      {countrySuggestions.length > 0 && (
+                        <div className="absolute left-0 right-0 top-full mt-1 bg-slate-800 border border-slate-700 rounded-xl overflow-hidden z-50 shadow-xl">
+                          {countrySuggestions.map((c) => (
+                            <button key={c.name} type="button"
+                              onClick={() => {
+                                setCountryQuery(c.name);
+                                setCountrySuggestions([]);
+                                setFormData(prev => ({ ...prev, nation: c.name, lat: c.lat, lng: c.lng }));
+                              }}
+                              className="w-full text-left px-3 py-2 text-sm hover:bg-slate-700 flex items-center justify-between">
+                              <span>{c.name}</span>
+                              <span className="text-[10px] text-slate-500 font-mono">{c.lat.toFixed(1)}, {c.lng.toFixed(1)}</span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
                   <Field label="Fonte"><input type="text" value={formData.source} onChange={(e) => setFormData({ ...formData, source: e.target.value })} placeholder="Reuters" className="inp" /></Field>
                 </div>
                 <div>
-                  <div className="flex items-center justify-between mb-1.5"><label className="text-xs text-slate-400">Posizione geografica</label><button type="button" onClick={() => setIsPickingLocation(true)} className="text-xs flex items-center gap-1" style={{ color: accent }}><MapPin className="w-3.5 h-3.5" /> Seleziona sul globo</button></div>
+                  <div className="flex items-center justify-between mb-1.5"><label className="text-xs text-slate-400">Coordinate geografiche</label><button type="button" onClick={() => setIsPickingLocation(true)} className="text-xs flex items-center gap-1" style={{ color: accent }}><MapPin className="w-3.5 h-3.5" /> Seleziona sul globo</button></div>
                   <div className="grid grid-cols-2 gap-3">
                     <input type="number" step="0.0001" value={formData.lat ?? ''} onChange={(e) => setFormData({ ...formData, lat: parseFloat(e.target.value) || 0 })} className="inp font-mono" placeholder="Lat" />
                     <input type="number" step="0.0001" value={formData.lng ?? ''} onChange={(e) => setFormData({ ...formData, lng: parseFloat(e.target.value) || 0 })} className="inp font-mono" placeholder="Lng" />
@@ -1237,7 +1358,16 @@ function Timeline({ news, currentIndex, settings, accent, onSelect, onReorder, o
           <Clock className="w-3.5 h-3.5 text-slate-500 flex-shrink-0" />
           <span className="text-[11px] text-slate-400 flex-shrink-0">Durata clip</span>
           <input type="range" min={1000} max={8000} step={250} value={clipMs(sel)} onChange={(e) => onSetDuration(sel.id, Number(e.target.value))} className="flex-1" />
-          <span className="text-[11px] font-mono text-slate-300 w-10 text-right flex-shrink-0">{fmtSec(clipMs(sel))}</span>
+          <input
+            type="number" min={1} max={30} step={0.1}
+            value={(clipMs(sel) / 1000).toFixed(1)}
+            onChange={(e) => {
+              const v = parseFloat(e.target.value);
+              if (Number.isFinite(v) && v > 0) onSetDuration(sel.id, Math.round(v * 1000));
+            }}
+            className="w-14 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 text-[11px] font-mono text-slate-200 text-right focus:outline-none focus:border-slate-500 flex-shrink-0"
+          />
+          <span className="text-[10px] text-slate-500 flex-shrink-0">s</span>
           {sel.duration && <button onClick={() => onSetDuration(sel.id, undefined)} className="text-[10px] text-slate-500 hover:text-slate-300 flex-shrink-0">auto</button>}
         </div>
       )}
