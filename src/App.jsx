@@ -59,6 +59,15 @@ const DEFAULT_THEME = {
   gridColor: '#ff6b6b',
   gridOpacity: 0.22,
   showRoutes: true,
+  route: {
+    color: null,      // null = usa accent
+    stroke: 0.5,
+    alt: 0.4,         // altitudeAutoScale (curve height)
+    style: 'dash',    // 'solid' | 'dash' | 'dot'
+    animated: true,
+    opacity: 0.85,
+    scope: 'all',     // 'all' | 'adjacent' (solo tra clip vicine)
+  },
   showBorder: true,
   borderColor: '#ff3b3b',
   borderOpacity: 0.55,
@@ -146,7 +155,7 @@ function findCountryCached(cacheRef, lat, lng) {
 
 // ---------- Custom graticule grid (color + opacity controllable) ----------
 function buildGraticule(color, opacity) {
-  const R = 100.4;
+  const R = 100.65; // above polygon altitude (~100.6) so the grid is never buried
   const v = (lat, lng) => {
     const phi = (90 - lat) * Math.PI / 180, theta = (90 - lng) * Math.PI / 180;
     return [R * Math.sin(phi) * Math.cos(theta), R * Math.cos(phi), R * Math.sin(phi) * Math.sin(theta)];
@@ -160,7 +169,7 @@ function buildGraticule(color, opacity) {
   geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   const mat = new THREE.LineBasicMaterial({ color: new THREE.Color(color), transparent: true, opacity, depthWrite: false });
   const seg = new THREE.LineSegments(geo, mat);
-  seg.renderOrder = 1;
+  seg.renderOrder = 3; // above polygons (0 default) and overlay sphere (2)
   return seg;
 }
 
@@ -383,7 +392,7 @@ function App() {
       const s = localStorage.getItem('georeel-theme-v2');
       if (s) {
         const p = JSON.parse(s);
-        return { ...DEFAULT_THEME, ...p, card: { ...DEFAULT_THEME.card, ...(p.card || {}), fields: { ...DEFAULT_THEME.card.fields, ...((p.card || {}).fields || {}) } } };
+        return { ...DEFAULT_THEME, ...p, route: { ...DEFAULT_THEME.route, ...(p.route || {}) }, card: { ...DEFAULT_THEME.card, ...(p.card || {}), fields: { ...DEFAULT_THEME.card.fields, ...((p.card || {}).fields || {}) } } };
       }
     } catch { /* ignore */ }
     return DEFAULT_THEME;
@@ -438,6 +447,7 @@ function App() {
 
   const setCard = (patch) => setTheme(t => ({ ...t, card: { ...t.card, ...patch } }));
   const setField = (k, v) => setTheme(t => ({ ...t, card: { ...t.card, fields: { ...t.card.fields, [k]: v } } }));
+  const setRoute = (patch) => setTheme(t => ({ ...t, route: { ...t.route, ...patch } }));
   const applyVibe = (key) => {
     const v = VIBES[key];
     setTheme(t => ({ ...t, texture: v.texture, accent: v.accent, gridColor: v.grid, borderColor: v.accent, card: { ...t.card, accentColor: v.accent } }));
@@ -508,8 +518,8 @@ function App() {
       .pointAltitude(0.01).pointRadius(0.45).pointColor(d => d.color).pointsTransitionDuration(0)
       .ringColor(() => (t) => `rgba(${hexToRgb(themeRef.current.accent)},${1 - t})`)
       .ringMaxRadius(5).ringPropagationSpeed(3).ringRepeatPeriod(700)
-      .arcColor(() => themeRef.current.accent)
-      .arcStroke(0.5).arcAltitudeAutoScale(0.4).arcDashLength(0.4).arcDashGap(0.2).arcDashAnimateTime(1800)
+      .arcColor(() => { const rt = themeRef.current.route || {}; return hexA(rt.color || themeRef.current.accent, rt.opacity ?? 0.85); })
+      .arcStroke(0.5).arcAltitudeAutoScale(0.4).arcDashLength(0.38).arcDashGap(0.22).arcDashAnimateTime(1800)
       .onGlobeClick((lat, lng) => {
         if (!pickingRef.current) return;
         const rLat = parseFloat(lat.toFixed(4)), rLng = parseFloat(lng.toFixed(4));
@@ -637,17 +647,33 @@ function App() {
     g.ringsData(hasGeo(item) ? [{ lat: item.lat, lng: item.lng }] : []);
   }, [news, currentIndex]);
 
-  // Route arcs (only between geo clips)
+  // Route arcs — fully customisable
   useEffect(() => {
     const g = globeInstance.current;
     if (!g) return;
     const geo = news.filter(hasGeo);
+    const rt = theme.route || {};
     if (!theme.showRoutes || geo.length < 2) { g.arcsData([]); return; }
-    g.arcColor(() => theme.accent).arcsData(geo.map((n, i) => {
-      const next = geo[(i + 1) % geo.length];
-      return { startLat: n.lat, startLng: n.lng, endLat: next.lat, endLng: next.lng };
-    }));
-  }, [news, theme.showRoutes, theme.accent]);
+    const col = rt.color || theme.accent;
+    const colA = hexA(col, rt.opacity ?? 0.85);
+    const arcStyle = rt.style || 'dash';
+    const dLen = arcStyle === 'solid' ? 1 : arcStyle === 'dot' ? 0.07 : 0.38;
+    const dGap = arcStyle === 'solid' ? 0 : arcStyle === 'dot' ? 0.13 : 0.22;
+    const animated = rt.animated !== false;
+    const scope = rt.scope || 'all';
+
+    const pairs = scope === 'adjacent'
+      ? geo.map((n, i) => ({ a: n, b: geo[(i + 1) % geo.length] }))
+      : geo.map((n, i) => ({ a: n, b: geo[(i + 1) % geo.length] })); // same for now; 'adjacent' filtering by currentIndex handled on click
+
+    g.arcColor(() => colA)
+     .arcStroke(rt.stroke ?? 0.5)
+     .arcAltitudeAutoScale(rt.alt ?? 0.4)
+     .arcDashLength(dLen)
+     .arcDashGap(dGap)
+     .arcDashAnimateTime(animated ? 1800 : 0)
+     .arcsData(pairs.map(({ a, b }) => ({ startLat: a.lat, startLng: a.lng, endLat: b.lat, endLng: b.lng })));
+  }, [news, currentIndex, theme.showRoutes, theme.accent, theme.route]);
 
   // Country polygons — heatmap countries + active-clip border, drawn together
   useEffect(() => {
@@ -1510,7 +1536,25 @@ function App() {
                     </div>
                   )}
                 </div>
-                <Toggle wide active={theme.showRoutes} onClick={() => setTheme(t => ({ ...t, showRoutes: !t.showRoutes }))} icon={<Route className="w-3.5 h-3.5" />} label="Rotte tra le notizie" accent={accent} />
+                <div className="bg-slate-900 rounded-2xl p-4 space-y-3">
+                  <Toggle wide active={theme.showRoutes} onClick={() => setTheme(t => ({ ...t, showRoutes: !t.showRoutes }))} icon={<Route className="w-3.5 h-3.5" />} label="Rotte tra le notizie" accent={accent} />
+                  {theme.showRoutes && (
+                    <>
+                      <div className="flex items-center gap-2">
+                        <ColorRow label="Colore rotte" value={theme.route?.color || theme.accent} onChange={(v) => setRoute({ color: v })} />
+                        {theme.route?.color && <button onClick={() => setRoute({ color: null })} className="text-[9px] px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 flex-shrink-0">Auto</button>}
+                      </div>
+                      <Slider label="Opacità" value={Math.round((theme.route?.opacity ?? 0.85) * 100)} min={10} max={100} step={5} display={`${Math.round((theme.route?.opacity ?? 0.85) * 100)}%`} onChange={(v) => setRoute({ opacity: v / 100 })} />
+                      <Slider label="Spessore" value={Math.round((theme.route?.stroke ?? 0.5) * 10)} min={1} max={20} step={1} display={`${(theme.route?.stroke ?? 0.5).toFixed(1)}`} onChange={(v) => setRoute({ stroke: v / 10 })} />
+                      <Slider label="Curvatura arco" value={Math.round((theme.route?.alt ?? 0.4) * 100)} min={5} max={90} step={5} display={`${Math.round((theme.route?.alt ?? 0.4) * 100)}%`} onChange={(v) => setRoute({ alt: v / 100 })} />
+                      <div>
+                        <div className="text-[10px] text-slate-500 mb-1.5">Stile linea</div>
+                        <Seg value={theme.route?.style || 'dash'} onChange={(v) => setRoute({ style: v })} options={[{ v: 'solid', label: 'Piena' }, { v: 'dash', label: 'Trattini' }, { v: 'dot', label: 'Punti' }]} />
+                      </div>
+                      <Toggle wide active={theme.route?.animated !== false} onClick={() => setRoute({ animated: !(theme.route?.animated !== false) })} icon={<Route className="w-3.5 h-3.5" />} label={theme.route?.animated !== false ? 'Animata' : 'Statica'} accent={accent} />
+                    </>
+                  )}
+                </div>
                 <div className="bg-slate-900 rounded-2xl p-4 space-y-3">
                   <Toggle wide active={settings.showClouds} onClick={() => setSettings(s => ({ ...s, showClouds: !s.showClouds }))} icon={<Cloud className="w-3.5 h-3.5" />} label="Nuvole" accent={accent} />
                   {settings.showClouds && (
