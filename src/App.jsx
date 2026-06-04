@@ -52,6 +52,9 @@ const DEFAULT_THEME = {
   planetOverlayOpacity: 0,
   planetEmissive: '#000000',
   planetEmissiveInt: 0,
+  planetSaturation: 1,
+  planetContrast: 1,
+  planetBrightness: 1,
   showGrid: true,
   gridColor: '#ff6b6b',
   gridOpacity: 0.22,
@@ -59,15 +62,32 @@ const DEFAULT_THEME = {
   showBorder: true,
   borderColor: '#ff3b3b',
   borderOpacity: 0.55,
+  heatmap: [], // [{ id, nation, lat, lng, color, conflict }]
   showCards: true,
   card: {
-    position: 'bottom', align: 'left', width: 304, radius: 16,
+    position: 'bottom', align: 'left', width: 304, radius: 16, padding: 16,
     titleFont: 'Playfair Display', bodyFont: 'Inter', titleSize: 16, textSize: 12.5,
     titleColor: '#f8fafc', textColor: '#cbd5e1', metaColor: '#94a3b8',
     bgColor: '#0b1220', bgOpacity: 0.92, accentColor: '#ff3b3b', borderWidth: 2,
+    shadow: 1, titleUpper: false, titleSpacing: 0,
     transitionType: 'slide', transitionMs: 350,
     fields: { category: true, date: true, body: true, nation: true, source: true },
   },
+};
+
+// Grayscale / cinematic grading applied to the globe only (preview: CSS filter on
+// the canvas; export: ctx.filter around the globe drawImage). Card stays untouched.
+const planetFilter = (th) => {
+  const sat = th.planetSaturation ?? 1, con = th.planetContrast ?? 1, br = th.planetBrightness ?? 1;
+  return (sat === 1 && con === 1 && br === 1) ? 'none' : `saturate(${sat}) contrast(${con}) brightness(${br})`;
+};
+
+// Intro presets — deterministic camera path for the first seconds of the reel.
+const INTRO_PRESETS = {
+  classic:   { label: 'Classica' },
+  worldSpin: { label: 'Mondo → spin → notizia' },
+  orbitIn:   { label: 'Spin → paese → notizia' },
+  dropIn:    { label: 'Tuffo dall’alto' },
 };
 
 const SAMPLE_NEWS = [
@@ -180,6 +200,58 @@ const lerpLng = (a, b, t) => { const d = ((b - a + 540) % 360) - 180; return a +
 const easeInOut = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
 const smootherstep = (t) => { const x = clamp01(t); return x * x * x * (x * (x * 6 - 15) + 10); };
 
+// ---------- Intro camera path ----------
+// Where the intro animation lands (= start of the first clip's fly, so no jump).
+function introEndPov(type, start, first, altitude) {
+  if (type === 'worldSpin') return { lat: lerp(start.lat, (first ? first.lat * 0.4 : start.lat), 0.3), lng: start.lng + 60, alt: 3.0 };
+  if (type === 'orbitIn' && first) return { lat: first.lat, lng: first.lng - 35, alt: Math.max(1.5, altitude + 0.7) };
+  if (type === 'dropIn' && first) return { lat: first.lat, lng: first.lng, alt: 2.5 };
+  return start;
+}
+function introPov(type, p, start, first, altitude) {
+  if (type === 'classic' || !first) return start;
+  const e = easeInOut(clamp01(p));
+  const end = introEndPov(type, start, first, altitude);
+  // worldSpin keeps a constant-speed lng spin (linear), others ease all axes.
+  const lngT = type === 'worldSpin' ? clamp01(p) : e;
+  return { lat: lerp(start.lat, end.lat, e), lng: lerpLng(start.lng, end.lng, lngT), alt: lerp(start.alt, end.alt, e) };
+}
+
+// ---------- Heatmap + active-border polygons (shared by preview & export) ----------
+const pulseAt = (ms) => 0.5 + 0.5 * Math.sin(ms * 0.004); // 0..1, ~1.6s period
+const polyCap = (th, pulse) => (d) => {
+  const m = d.__m;
+  if (!m || m.kind === 'border') return hexA(th.borderColor, th.borderOpacity * 0.28);
+  return hexA(m.color, m.conflict ? 0.30 + 0.45 * pulse : 0.40);
+};
+const polyStroke = (th, pulse) => (d) => {
+  const m = d.__m;
+  if (!m || m.kind === 'border') return hexA(th.borderColor, th.borderOpacity);
+  return hexA(m.color, m.conflict ? 0.55 + 0.45 * pulse : 0.85);
+};
+function applyPolyColors(g, th, pulse) {
+  g.polygonCapColor(polyCap(th, pulse))
+   .polygonSideColor(() => 'rgba(0,0,0,0)')
+   .polygonStrokeColor(polyStroke(th, pulse));
+}
+function buildPolygons(cache, activeItem, th) {
+  const out = [];
+  for (const h of th.heatmap || []) {
+    if (!Number.isFinite(h.lat) || !Number.isFinite(h.lng)) continue;
+    const f = findCountryCached(cache, h.lat, h.lng);
+    if (f) out.push({ ...f, __m: { kind: 'heat', color: h.color, conflict: !!h.conflict } });
+  }
+  if (th.showBorder && hasGeo(activeItem)) {
+    const f = findCountryCached(cache, activeItem.lat, activeItem.lng);
+    if (f) out.push({ ...f, __m: { kind: 'border' } });
+  }
+  return out;
+}
+function setPolygons(g, data, th, pulse) {
+  g.polygonsData(data).polygonAltitude(0.006);
+  applyPolyColors(g, th, pulse);
+}
+
 // Slow "satellite filming" orbit applied while the camera holds over a target.
 // intensity 0..1 → subtle, slow, never fully stops. Deterministic from holdMs.
 // A smootherstep ramp eases the offset in from ZERO so it joins the zoom-in with
@@ -225,16 +297,20 @@ const EXPORT_TIERS = {
 // Builds time→camera + time→active-card lookup. Mirrors live cinematicTo().
 function buildStoryboard(clips, st, cardTransMs) {
   const start = { lat: st.startLat, lng: st.startLng, alt: st.startAlt };
+  const introType = st.introType || 'classic';
+  const firstGeo = clips.find(hasGeo) || null;
   const segs = [];
   let t = 0;
-  segs.push({ t0: 0, t1: st.introMs, kind: 'intro', cam: start, clip: clips.length ? 0 : -1, animate: false });
+  segs.push({ t0: 0, t1: st.introMs, kind: 'intro', cam: start, introType, first: firstGeo, clip: clips.length ? 0 : -1, animate: false });
   t = st.introMs;
-  let prev = start;
+  let prev = st.introMs > 0 ? introEndPov(introType, start, firstGeo, st.altitude) : start;
   const drift0 = st.driftIntensity ?? 0;
   clips.forEach((clip, i) => {
     const dur = clip.duration || st.holdMs;
     const to = hasGeo(clip) ? { lat: clip.lat, lng: clip.lng, alt: st.altitude } : prev;
-    segs.push({ t0: t, t1: t + dur, kind: 'clip', from: prev, to, clip: i, flyMs: st.flyMs, animate: !(i === 0 && st.introMs > 0) });
+    // Card enters as the dolly-in starts (only for geo clips that actually zoom).
+    const revealDelay = hasGeo(clip) ? Math.min(st.flyMs * 0.45, dur * 0.5) : 0;
+    segs.push({ t0: t, t1: t + dur, kind: 'clip', from: prev, to, clip: i, flyMs: st.flyMs, animate: true, revealDelay });
     t += dur;
     // Hand off the ACTUAL drifted camera position to the next clip's fly start,
     // so there is no jump at the clip boundary when drift is active.
@@ -250,6 +326,10 @@ function buildStoryboard(clips, st, cardTransMs) {
   const drift = st.driftIntensity ?? 0;
   const povAt = (tms) => {
     const s = segAt(tms);
+    if (s.kind === 'intro') {
+      if (st.introMs <= 0) return s.cam;
+      return introPov(s.introType, (tms - s.t0) / st.introMs, s.cam, s.first, st.altitude);
+    }
     if (s.kind !== 'clip') return s.cam;
     const local = tms - s.t0, fly = s.flyMs, { from, to } = s;
     const flyEnd = fly * 1.05;
@@ -269,9 +349,10 @@ function buildStoryboard(clips, st, cardTransMs) {
   const cardAt = (tms) => {
     const s = segAt(tms);
     let alpha = 1;
+    if (s.kind === 'intro') alpha = 0; // card hidden during the intro, reveals on clip 0
     if (s.kind === 'clip' && s.animate) {
-      const local = tms - s.t0;
-      alpha = Math.min(1, local / Math.max(1, cardTransMs));
+      const local = tms - s.t0 - (s.revealDelay || 0);
+      alpha = clamp01(local / Math.max(1, cardTransMs));
       alpha = 1 - Math.pow(1 - alpha, 3);
     }
     const fadeBlack = (s.kind === 'outro' && st.outroType === 'fade')
@@ -309,7 +390,7 @@ function App() {
   });
 
   const [settings, setSettings] = useState(() => {
-    const defaults = { holdMs: 3000, flyMs: 1200, altitude: 0.9, startLat: 20, startLng: 10, startAlt: 2.4, introMs: 800, outroType: 'hold', outroMs: 1500, autoSpin: true, driftIntensity: 0, showClouds: false, cloudPreset: 'medium', cloudOpacity: 0.28, cloudSpeed: 0.5, cloudOffsetLng: 0, cloudTilt: 0, exportTier: 'fast' };
+    const defaults = { holdMs: 3000, flyMs: 1200, altitude: 0.9, startLat: 20, startLng: 10, startAlt: 2.4, introMs: 800, introType: 'classic', outroType: 'hold', outroMs: 1500, autoSpin: true, driftIntensity: 0, showClouds: false, cloudPreset: 'medium', cloudOpacity: 0.28, cloudSpeed: 0.5, cloudOffsetLng: 0, cloudTilt: 0, exportTier: 'fast' };
     try { const s = localStorage.getItem('georeel-settings-v1'); if (s) return { ...defaults, ...JSON.parse(s) }; } catch { /* ignore */ }
     return defaults;
   });
@@ -317,6 +398,12 @@ function App() {
   const [confirmDialog, setConfirmDialog] = useState(null);
   const [formError, setFormError] = useState('');
   const [exportPct, setExportPct] = useState(0);
+  const [introActive, setIntroActive] = useState(false);
+  const [cardSeq, setCardSeq] = useState(0); // forces card re-animation each playStep
+  // Heatmap add-row state
+  const [heatQuery, setHeatQuery] = useState('');
+  const [heatSugg, setHeatSugg] = useState([]);
+  const [heatColor, setHeatColor] = useState('#ef4444');
 
   const globeEl = useRef(null);
   const globeInstance = useRef(null);
@@ -324,6 +411,7 @@ function App() {
   const overlayRef = useRef(null);
   const cloudRef = useRef(null);
   const countryCache = useRef({});
+  const pulseRef = useRef(1);
   const cardTransRef = useRef({ active: false, start: 0, dur: 350, type: 'slide' });
   const outroRef = useRef({ active: false, start: 0, dur: 0, type: 'none' });
 
@@ -354,6 +442,15 @@ function App() {
     const v = VIBES[key];
     setTheme(t => ({ ...t, texture: v.texture, accent: v.accent, gridColor: v.grid, borderColor: v.accent, card: { ...t.card, accentColor: v.accent } }));
   };
+  // Heatmap CRUD
+  const addHeat = (c) => {
+    setTheme(t => (t.heatmap || []).some(h => h.nation === c.name)
+      ? t
+      : { ...t, heatmap: [...(t.heatmap || []), { id: newId(), nation: c.name, lat: c.lat, lng: c.lng, color: heatColor, conflict: false }] });
+    setHeatQuery(''); setHeatSugg([]);
+  };
+  const patchHeat = (id, patch) => setTheme(t => ({ ...t, heatmap: (t.heatmap || []).map(h => h.id === id ? { ...h, ...patch } : h) }));
+  const removeHeat = (id) => setTheme(t => ({ ...t, heatmap: (t.heatmap || []).filter(h => h.id !== id) }));
 
   // Persist
   useEffect(() => { try { localStorage.setItem('georeel-news', JSON.stringify(news)); } catch { /* ignore */ } }, [news]);
@@ -476,10 +573,15 @@ function App() {
     // Living-cloud animation (preview). Export drives it deterministically per-frame.
     let cloudRafId;
     const rotateCloud = () => {
-      const m = cloudRef.current;
-      if (m && m.visible && !exportingRef.current) {
-        const sr = settingsRef.current;
-        animateCloud(m, m.userData.baseOpacity, sr.cloudSpeed ?? 0.5, sr.cloudOffsetLng ?? 0, sr.cloudTilt ?? 0, nowMs());
+      if (!exportingRef.current) {
+        const sr = settingsRef.current, th = themeRef.current, ms = nowMs();
+        const m = cloudRef.current;
+        if (m && m.visible) animateCloud(m, m.userData.baseOpacity, sr.cloudSpeed ?? 0.5, sr.cloudOffsetLng ?? 0, sr.cloudTilt ?? 0, ms);
+        // Pulse conflict countries (only when at least one is flagged)
+        if (globeInstance.current && th.heatmap && th.heatmap.some(h => h.conflict)) {
+          pulseRef.current = pulseAt(ms);
+          applyPolyColors(globeInstance.current, th, pulseRef.current);
+        }
       }
       cloudRafId = requestAnimationFrame(rotateCloud);
     };
@@ -547,20 +649,19 @@ function App() {
     }));
   }, [news, theme.showRoutes, theme.accent]);
 
-  // Country border
+  // Country polygons — heatmap countries + active-clip border, drawn together
   useEffect(() => {
     const g = globeInstance.current;
     if (!g) return;
-    const item = news[currentIndex];
-    const country = (theme.showBorder && hasGeo(item)) ? findCountryCached(countryCache, item.lat, item.lng) : null;
-    if (country) {
-      g.polygonsData([country]).polygonAltitude(0.006)
-       .polygonCapColor(() => hexA(theme.borderColor, theme.borderOpacity * 0.28))
-       .polygonSideColor(() => 'rgba(0,0,0,0)')
-       .polygonStrokeColor(() => hexA(theme.borderColor, theme.borderOpacity))
-       .polygonsTransitionDuration(400);
-    } else g.polygonsData([]);
-  }, [news, currentIndex, theme.showBorder, theme.borderColor, theme.borderOpacity]);
+    g.polygonsTransitionDuration(400);
+    setPolygons(g, buildPolygons(countryCache, news[currentIndex], theme), theme, pulseRef.current);
+  }, [news, currentIndex, theme.showBorder, theme.borderColor, theme.borderOpacity, theme.heatmap]);
+
+  // Globe color grading (grayscale / cinematic) — CSS filter on the live canvas
+  useEffect(() => {
+    const cv = globeEl.current?.querySelector('canvas');
+    if (cv) cv.style.filter = planetFilter(theme);
+  }, [theme.planetSaturation, theme.planetContrast, theme.planetBrightness, theme.texture]);
 
   // Planet emissive glow
   useEffect(() => {
@@ -620,6 +721,7 @@ function App() {
     const s = settingsRef.current;
     cardTransRef.current = { active: true, start: nowMs(), dur: c.transitionMs ?? 350, type: c.transitionType ?? 'slide' };
     setCurrentIndex(idx);
+    setCardSeq(n => n + 1); // re-trigger card entrance even when index is unchanged
     const item = list[idx];
     cinematicTo(item);
     // Arm satellite drift once the dolly-in settles (geo clips hold over the target;
@@ -636,19 +738,42 @@ function App() {
     const dur = item.duration || s.holdMs;
     playState.current.slideTimer = setTimeout(() => { if (playState.current.playing) playStep(idx + 1); }, dur);
   };
+  // Animated intro (worldSpin/orbitIn/dropIn): drive the camera over introMs, then play.
+  const runIntro = (done) => {
+    const g = globeInstance.current;
+    const st = settingsRef.current;
+    const start = { lat: st.startLat, lng: st.startLng, alt: st.startAlt };
+    const first = newsRef.current.find(hasGeo) || null;
+    if (!g || st.introMs <= 0) { done(); return; }
+    setIntroActive(true);
+    g.pointOfView({ lat: start.lat, lng: start.lng, altitude: start.alt }, 0);
+    const t0 = nowMs();
+    const step = () => {
+      if (!playState.current.playing) { setIntroActive(false); return; }
+      const p = (nowMs() - t0) / st.introMs;
+      if (p >= 1) { setIntroActive(false); done(); return; }
+      const pov = introPov(st.introType || 'classic', p, start, first, st.altitude);
+      g.pointOfView({ lat: pov.lat, lng: pov.lng, altitude: pov.alt }, 0);
+      playState.current.introRaf = requestAnimationFrame(step);
+    };
+    playState.current.introRaf = requestAnimationFrame(step);
+  };
   const startPreview = () => {
     if (!newsRef.current.length) { showToast('Aggiungi almeno una notizia', 'error'); return; }
     playState.current.playing = true;
     setIsPlaying(true);
     if (globeInstance.current) globeInstance.current.controls().autoRotate = false;
-    playStep(0);
+    if (settingsRef.current.introMs > 0) runIntro(() => playStep(0));
+    else playStep(0);
   };
   const stopPreview = () => {
     clearTimeout(playState.current.slideTimer);
     clearTimeout(playState.current.zoomTimer);
     clearTimeout(playState.current.driftTimer);
+    if (playState.current.introRaf) cancelAnimationFrame(playState.current.introRaf);
     holdRef.current = { ...holdRef.current, active: false };
-    playState.current = { playing: false, slideTimer: null, zoomTimer: null, driftTimer: null };
+    playState.current = { playing: false, slideTimer: null, zoomTimer: null, driftTimer: null, introRaf: null };
+    setIntroActive(false);
     setIsPlaying(false);
     if (globeInstance.current) globeInstance.current.controls().autoRotate = settingsRef.current.autoSpin;
   };
@@ -705,15 +830,19 @@ function App() {
     if (alpha < 1) ctx.globalAlpha = alpha;
     const c = themeRef.current.card;
     const f = item.type === 'info' ? { category: false, date: false, body: true, nation: false, source: false } : c.fields;
-    const pad = 16 * s;
+    const pad = (c.padding ?? 16) * s;
     const cw = c.width * s;
     const innerW = cw - pad * 2;
 
     const bodyFam = FONT_FAMILY[c.bodyFont] || FONT_FAMILY.Inter;
     const metaCol = c.metaColor || '#94a3b8';
+    const titleText = c.titleUpper ? (item.title || '').toUpperCase() : (item.title || '');
+    const titleLS = (c.titleSpacing || 0) * s;
     ctx.textBaseline = 'alphabetic';
+    ctx.letterSpacing = titleLS + 'px';
     ctx.font = `700 ${c.titleSize * s}px ${FONT_FAMILY[c.titleFont]}`;
-    const titleLines = wrapLines(ctx, item.title, innerW, 3);
+    const titleLines = wrapLines(ctx, titleText, innerW, 3);
+    ctx.letterSpacing = '0px';
     ctx.font = `${c.textSize * s}px ${bodyFam}`;
     const bodyLines = f.body ? wrapLines(ctx, item.text, innerW, 4) : [];
 
@@ -738,7 +867,8 @@ function App() {
 
     // background
     ctx.save();
-    ctx.shadowColor = 'rgba(0,0,0,0.5)'; ctx.shadowBlur = 28 * s; ctx.shadowOffsetY = 12 * s;
+    const sh = c.shadow ?? 1;
+    if (sh > 0) { ctx.shadowColor = `rgba(0,0,0,${0.5 * Math.min(1, sh)})`; ctx.shadowBlur = 28 * s * sh; ctx.shadowOffsetY = 12 * s * sh; }
     roundRect(ctx, cx, cy, cw, h, c.radius * s);
     ctx.fillStyle = hexA(c.bgColor, c.bgOpacity);
     ctx.fill();
@@ -786,9 +916,11 @@ function App() {
 
     // title
     ctx.fillStyle = c.titleColor;
+    ctx.letterSpacing = titleLS + 'px';
     ctx.font = `700 ${c.titleSize * s}px ${FONT_FAMILY[c.titleFont]}`;
     y += c.titleSize * s;
     for (const ln of titleLines) { ctx.fillText(ln, tx, y); y += titleLH; }
+    ctx.letterSpacing = '0px';
 
     // body
     if (bodyLines.length) {
@@ -827,7 +959,9 @@ function App() {
     const W = g.width, H = g.height, s = W / 360;
     const comp = document.createElement('canvas'); comp.width = W; comp.height = H;
     const ctx = comp.getContext('2d');
+    ctx.filter = planetFilter(themeRef.current);
     ctx.drawImage(g, 0, 0, W, H);
+    ctx.filter = 'none';
     drawCard(ctx, s, currentNewsRef.current);
     const a = document.createElement('a');
     a.download = `GeoReel_${fileStamp()}.png`;
@@ -933,6 +1067,8 @@ function App() {
       const transType = th.card.transitionType ?? 'slide';
       const frameDur = 1 / fps;
       let lastClipIdx = -1;
+      let hasConflictPoly = (th.heatmap || []).some(h => h.conflict);
+      const planetFx = planetFilter(th);
       // Pipelined: kick off encoding for frame f while rendering frame f+1.
       // source.add() captures the canvas synchronously (snapshot) then encodes async.
       let pendingEncode = null;
@@ -944,20 +1080,13 @@ function App() {
         const item = clips[clip] || null;
         currentNewsRef.current = item;
 
-        // Country border: set once per clip change
+        // Country polygons (heatmap + active border): rebuild once per clip change
         if (clip !== lastClipIdx) {
           lastClipIdx = clip;
-          if (th.showBorder && item && hasGeo(item)) {
-            const country = findCountryCached(countryCache, item.lat, item.lng);
-            if (country) {
-              gInst.polygonsData([country])
-                .polygonAltitude(0.006)
-                .polygonCapColor(() => hexA(th.borderColor, th.borderOpacity * 0.28))
-                .polygonSideColor(() => 'rgba(0,0,0,0)')
-                .polygonStrokeColor(() => hexA(th.borderColor, th.borderOpacity));
-            } else { gInst.polygonsData([]); }
-          } else { gInst.polygonsData([]); }
+          setPolygons(gInst, buildPolygons(countryCache, item, th), th, pulseAt(tms));
         }
+        // Animate conflict-country color pulse every frame
+        if (hasConflictPoly) applyPolyColors(gInst, th, pulseAt(tms));
 
         // Deterministic arc dash advance (matches live speed: 1 unit / ARC_PERIOD ms)
         const dashVal = tms / ARC_PERIOD;
@@ -970,7 +1099,9 @@ function App() {
         // Render globe at native resolution (fast), upscale via drawImage
         setCameraPOV(pov);
         ctx.clearRect(0, 0, W, H);
+        ctx.filter = planetFx; // grayscale/cinematic grading on the globe only
         ctx.drawImage(g, 0, 0, W, H); // smooth upscale from 720p to export res
+        ctx.filter = 'none';
         const offsetY = transType === 'slide' ? (1 - alpha) * 28 * s : 0;
         const drawAlpha = transType === 'none' ? 1 : alpha;
         const scale = transType === 'zoom' ? 0.92 + 0.08 * alpha : 1;
@@ -1163,14 +1294,16 @@ function App() {
                 <div className="text-center px-8"><MapPin className="w-10 h-10 mx-auto mb-3" style={{ color: accent }} /><div className="text-white text-lg font-semibold">Clicca sul globo</div><div className="text-slate-400 mt-1 text-sm">Scegli la posizione della notizia</div></div>
               </div>
             )}
-            {theme.showCards && currentNews && (
+            {theme.showCards && currentNews && !introActive && (
               <div className="card-slot" style={slotStyle}>
-                <motion.div key={currentNews.id}
+                <motion.div key={`${currentNews.id}-${cardSeq}`}
                 initial={card.transitionType === 'none' ? { opacity: 1, y: 0, scale: 1 } : card.transitionType === 'fade' ? { opacity: 0, y: 0, scale: 1 } : card.transitionType === 'zoom' ? { opacity: 0, scale: 0.92, y: 0 } : { opacity: 0, y: 22, scale: 1 }}
                 animate={{ opacity: 1, y: 0, scale: 1 }}
-                transition={{ duration: (card.transitionMs || 350) / 1000, ease: [0.23, 1, 0.32, 1] }}
+                transition={{ duration: (card.transitionMs || 350) / 1000, ease: [0.23, 1, 0.32, 1], delay: (isPlaying && hasGeo(currentNews)) ? Math.min(settings.flyMs * 0.45, (currentNews.duration || settings.holdMs) * 0.5) / 1000 : 0 }}
                   className="news-card" style={{
                     width: card.width, borderRadius: card.radius, textAlign: card.align,
+                    padding: `${card.padding ?? 16}px ${(card.padding ?? 16) + 2}px`,
+                    boxShadow: (card.shadow ?? 1) > 0 ? `0 ${24 * (card.shadow ?? 1)}px ${40 * (card.shadow ?? 1)}px -12px rgba(0,0,0,${0.7 * Math.min(1, card.shadow ?? 1)})` : 'none',
                     background: hexA(card.bgColor, card.bgOpacity), backdropFilter: 'blur(6px)',
                     borderTop: `${card.borderWidth}px solid ${card.accentColor}`,
                   }}>
@@ -1180,7 +1313,7 @@ function App() {
                       {card.fields.date && <span className="text-[10px] font-mono" style={{ color: card.metaColor }}>{currentNews.date}</span>}
                     </div>
                   )}
-                  <h3 style={{ color: card.titleColor, fontFamily: FONT_FAMILY[card.titleFont], fontSize: card.titleSize, fontWeight: 700 }}>{currentNews.title}</h3>
+                  <h3 style={{ color: card.titleColor, fontFamily: FONT_FAMILY[card.titleFont], fontSize: card.titleSize, fontWeight: 700, textTransform: card.titleUpper ? 'uppercase' : 'none', letterSpacing: card.titleSpacing ? `${card.titleSpacing}px` : 'normal' }}>{currentNews.title}</h3>
                   {(currentNews.type === 'info' || card.fields.body) && <p style={{ color: card.textColor, fontSize: card.textSize, fontFamily: FONT_FAMILY[card.bodyFont] || FONT_FAMILY.Inter }} className="line-clamp-4">{currentNews.text}</p>}
                   {currentNews.type !== 'info' && (card.fields.nation || card.fields.source) && (
                     <div className="flex items-center justify-between text-[10px] pt-2.5 border-t border-white/10" style={{ fontFamily: FONT_FAMILY[card.bodyFont] || FONT_FAMILY.Inter }}>
@@ -1242,7 +1375,19 @@ function App() {
                     </div>
                   </div>
                   <Slider label="Altitudine inizio" value={Math.round(settings.startAlt * 100)} min={50} max={500} step={5} display={`${settings.startAlt.toFixed(2)}x`} onChange={(v) => setSettings(s => ({ ...s, startAlt: v / 100 }))} />
-                  <Slider label="Pausa intro" value={settings.introMs} min={0} max={4000} step={200} display={settings.introMs === 0 ? 'Nessuna' : fmtSec(settings.introMs)} onChange={(v) => setSettings(s => ({ ...s, introMs: v }))} />
+                  <div>
+                    <div className="text-[10px] text-slate-500 mb-1">Stile intro</div>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      {Object.entries(INTRO_PRESETS).map(([k, p]) => (
+                        <button key={k} onClick={() => setSettings(s => ({ ...s, introType: k }))}
+                          className={`py-1.5 px-2 text-[10px] rounded-lg border transition-all leading-tight ${settings.introType === k ? '' : 'border-slate-700 text-slate-400 hover:border-slate-600'}`}
+                          style={settings.introType === k ? { borderColor: accent, background: accent + '1a', color: accent } : {}}>
+                          {p.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <Slider label="Durata intro" value={settings.introMs} min={0} max={5000} step={200} display={settings.introMs === 0 ? 'Nessuna' : fmtSec(settings.introMs)} onChange={(v) => setSettings(s => ({ ...s, introMs: v }))} />
                   <div>
                     <div className="text-[10px] text-slate-500 mb-1">Tipo outro</div>
                     <Seg value={settings.outroType} onChange={(v) => setSettings(s => ({ ...s, outroType: v }))} options={[{ v: 'none', label: 'Nessuno' }, { v: 'hold', label: 'Hold' }, { v: 'fade', label: 'Fade nero' }]} />
@@ -1300,7 +1445,17 @@ function App() {
                   </div>
                 </div>
                 <div className="bg-slate-900 rounded-2xl p-4 space-y-4">
-                  <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">Grading colore pianeta</div>
+                  <div className="flex items-center justify-between">
+                    <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">Grading colore pianeta</div>
+                    <div className="flex gap-1">
+                      <button onClick={() => setTheme(t => ({ ...t, planetSaturation: 0, planetContrast: 1.15, planetBrightness: 1.05 }))} className="text-[9px] px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300">B/N</button>
+                      <button onClick={() => setTheme(t => ({ ...t, planetSaturation: 1, planetContrast: 1, planetBrightness: 1 }))} className="text-[9px] px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300">Reset</button>
+                    </div>
+                  </div>
+                  <Slider label="Saturazione" value={Math.round((theme.planetSaturation ?? 1) * 100)} min={0} max={200} step={5} display={`${Math.round((theme.planetSaturation ?? 1) * 100)}%`} onChange={(v) => setTheme(t => ({ ...t, planetSaturation: v / 100 }))} />
+                  <Slider label="Contrasto" value={Math.round((theme.planetContrast ?? 1) * 100)} min={50} max={180} step={5} display={`${Math.round((theme.planetContrast ?? 1) * 100)}%`} onChange={(v) => setTheme(t => ({ ...t, planetContrast: v / 100 }))} />
+                  <Slider label="Luminosità" value={Math.round((theme.planetBrightness ?? 1) * 100)} min={50} max={160} step={5} display={`${Math.round((theme.planetBrightness ?? 1) * 100)}%`} onChange={(v) => setTheme(t => ({ ...t, planetBrightness: v / 100 }))} />
+                  <div className="h-px bg-slate-800" />
                   <ColorRow label="Tinta overlay" value={theme.planetOverlayColor} onChange={(v) => setTheme(t => ({ ...t, planetOverlayColor: v }))} />
                   <Slider label="Intensità tinta" value={Math.round((theme.planetOverlayOpacity || 0) * 100)} min={0} max={70} step={5} display={`${Math.round((theme.planetOverlayOpacity || 0) * 100)}%`} onChange={(v) => setTheme(t => ({ ...t, planetOverlayOpacity: v / 100 }))} />
                   <ColorRow label="Bagliore emissivo" value={theme.planetEmissive} onChange={(v) => setTheme(t => ({ ...t, planetEmissive: v }))} />
@@ -1323,6 +1478,37 @@ function App() {
                     <ColorRow label="Colore confine" value={theme.borderColor} onChange={(v) => setTheme(t => ({ ...t, borderColor: v }))} />
                     <Slider label="Intensità confine" value={Math.round(theme.borderOpacity * 100)} min={10} max={100} step={5} display={`${Math.round(theme.borderOpacity * 100)}%`} onChange={(v) => setTheme(t => ({ ...t, borderOpacity: v / 100 }))} />
                   </>}
+                </div>
+                <div className="bg-slate-900 rounded-2xl p-4 space-y-3">
+                  <div className="flex items-center gap-2 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
+                    <MapPin className="w-3.5 h-3.5" /> Heatmap paesi
+                  </div>
+                  <div className="text-[10px] text-slate-500 -mt-1.5 leading-snug">Colora più paesi insieme. Spunta “conflitto” per far pulsare il colore.</div>
+                  <div className="flex items-center gap-2">
+                    <input type="color" value={heatColor} onChange={(e) => setHeatColor(e.target.value)} title="Colore paese" className="w-8 h-8 rounded-lg bg-transparent border border-slate-700 p-0.5 flex-shrink-0" />
+                    <div className="relative flex-1">
+                      <input value={heatQuery} onChange={(e) => { const q = e.target.value; setHeatQuery(q); setHeatSugg(q.length >= 2 ? searchCountries(q) : []); }} placeholder="Aggiungi paese…" className="inp w-full text-xs" autoComplete="off" />
+                      {heatSugg.length > 0 && (
+                        <div className="absolute left-0 right-0 top-full mt-1 bg-slate-800 border border-slate-700 rounded-xl overflow-hidden z-50 shadow-xl max-h-44 overflow-y-auto">
+                          {heatSugg.map((c) => (
+                            <button key={c.name} type="button" onClick={() => addHeat(c)} className="w-full text-left px-3 py-2 text-xs hover:bg-slate-700">{c.name}</button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  {(theme.heatmap || []).length > 0 && (
+                    <div className="space-y-1.5">
+                      {theme.heatmap.map((h) => (
+                        <div key={h.id} className="flex items-center gap-2 bg-slate-800/60 rounded-xl px-2.5 py-1.5">
+                          <input type="color" value={h.color} onChange={(e) => patchHeat(h.id, { color: e.target.value })} className="w-6 h-6 rounded-md bg-transparent border border-slate-700 p-0.5 flex-shrink-0" />
+                          <span className="text-xs flex-1 truncate">{h.nation}</span>
+                          <button onClick={() => patchHeat(h.id, { conflict: !h.conflict })} title="In conflitto (pulsa)" className={`text-[9px] px-2 py-1 rounded-lg border transition-colors ${h.conflict ? '' : 'border-slate-700 text-slate-500'}`} style={h.conflict ? { borderColor: h.color, background: h.color + '22', color: h.color } : {}}>⚔ Conflitto</button>
+                          <button onClick={() => removeHeat(h.id)} className="p-1 text-slate-500 hover:text-red-400"><Trash2 className="w-3.5 h-3.5" /></button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
                 <Toggle wide active={theme.showRoutes} onClick={() => setTheme(t => ({ ...t, showRoutes: !t.showRoutes }))} icon={<Route className="w-3.5 h-3.5" />} label="Rotte tra le notizie" accent={accent} />
                 <div className="bg-slate-900 rounded-2xl p-4 space-y-3">
@@ -1369,9 +1555,11 @@ function App() {
                 </div>
                 <div className="bg-slate-900 rounded-2xl p-4 space-y-4">
                   <Slider label="Larghezza" value={card.width} min={220} max={340} step={4} display={`${card.width}px`} onChange={(v) => setCard({ width: v })} />
+                  <Slider label="Padding interno" value={card.padding ?? 16} min={8} max={32} step={1} display={`${card.padding ?? 16}px`} onChange={(v) => setCard({ padding: v })} />
                   <Slider label="Arrotondamento" value={card.radius} min={0} max={28} step={1} display={`${card.radius}px`} onChange={(v) => setCard({ radius: v })} />
                   <Slider label="Opacità sfondo" value={Math.round(card.bgOpacity * 100)} min={20} max={100} step={5} display={`${Math.round(card.bgOpacity * 100)}%`} onChange={(v) => setCard({ bgOpacity: v / 100 })} />
                   <Slider label="Bordo accento" value={card.borderWidth} min={0} max={8} step={1} display={`${card.borderWidth}px`} onChange={(v) => setCard({ borderWidth: v })} />
+                  <Slider label="Ombra" value={Math.round((card.shadow ?? 1) * 100)} min={0} max={200} step={10} display={(card.shadow ?? 1) === 0 ? 'Off' : `${Math.round((card.shadow ?? 1) * 100)}%`} onChange={(v) => setCard({ shadow: v / 100 })} />
                 </div>
                 <div className="bg-slate-900 rounded-2xl p-4 space-y-4">
                   <div>
@@ -1392,6 +1580,8 @@ function App() {
                   </div>
                   <Slider label="Dimensione titolo" value={card.titleSize} min={12} max={24} step={1} display={`${card.titleSize}px`} onChange={(v) => setCard({ titleSize: v })} />
                   <Slider label="Dimensione testo" value={Math.round(card.textSize)} min={10} max={18} step={1} display={`${Math.round(card.textSize)}px`} onChange={(v) => setCard({ textSize: v })} />
+                  <Slider label="Spaziatura titolo" value={Math.round((card.titleSpacing || 0) * 10)} min={-10} max={40} step={2} display={`${(card.titleSpacing || 0).toFixed(1)}px`} onChange={(v) => setCard({ titleSpacing: v / 10 })} />
+                  <Toggle wide active={!!card.titleUpper} onClick={() => setCard({ titleUpper: !card.titleUpper })} icon={<Type className="w-3.5 h-3.5" />} label="TITOLO MAIUSCOLO" accent={accent} />
                 </div>
                 <div className="bg-slate-900 rounded-2xl p-4 space-y-3">
                   <ColorRow label="Colore titolo" value={card.titleColor} onChange={(v) => setCard({ titleColor: v })} />
