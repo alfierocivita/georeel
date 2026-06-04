@@ -4,7 +4,7 @@ import Globe from 'globe.gl';
 import { feature } from 'topojson-client';
 import countriesTopo from 'world-atlas/countries-110m.json';
 import { motion, Reorder } from 'framer-motion';
-import { Output, Mp4OutputFormat, WebMOutputFormat, BufferTarget, CanvasSource, QUALITY_HIGH, getFirstEncodableVideoCodec } from 'mediabunny';
+// mediabunny (video encoder, ~heavy) is loaded on demand inside the export fn.
 import {
   Play, Pause, Download, Image as ImageIcon, Plus, Trash2, Edit2,
   MapPin, RotateCcw, Globe as GlobeIcon, Route, Grid3x3, Layers, Type, Clock, Cloud
@@ -130,7 +130,10 @@ const hexToRgb = (hex) => {
 };
 
 // ---------- Country borders ----------
-const COUNTRY_FEATURES = feature(countriesTopo, countriesTopo.objects.countries).features;
+// Topology→GeoJSON conversion is deferred to first lookup so it doesn't block the
+// initial paint (runs after mount, lazily memoized).
+let _countryFeatures = null;
+const getCountryFeatures = () => (_countryFeatures ??= feature(countriesTopo, countriesTopo.objects.countries).features);
 function pointInPoly(lng, lat, geometry) {
   if (!geometry) return false;
   const polys = geometry.type === 'MultiPolygon' ? geometry.coordinates : [geometry.coordinates];
@@ -143,7 +146,7 @@ function pointInPoly(lng, lat, geometry) {
     return inside;
   });
 }
-const findCountry = (lat, lng) => COUNTRY_FEATURES.find(f => pointInPoly(lng, lat, f.geometry)) ?? null;
+const findCountry = (lat, lng) => getCountryFeatures().find(f => pointInPoly(lng, lat, f.geometry)) ?? null;
 // Memoize per unique lat/lng — point-in-polygon is expensive
 function findCountryCached(cacheRef, lat, lng) {
   const key = `${lat}\x00${lng}`;
@@ -506,7 +509,7 @@ function App() {
     if (!globeEl.current || globeInstance.current) return;
     const th = themeRef.current;
 
-    const globe = Globe({ rendererConfig: { preserveDrawingBuffer: true, antialias: true } })(globeEl.current)
+    const globe = Globe({ rendererConfig: { preserveDrawingBuffer: true, antialias: true, powerPreference: 'high-performance' } })(globeEl.current)
       .width(360).height(640)
       .globeImageUrl(TEXTURES[th.texture].url)
       .bumpImageUrl(BUMP_URL)
@@ -1019,6 +1022,8 @@ function App() {
     if (!g) { showToast('Globo non pronto', 'error'); return; }
     const clips = newsRef.current;
     if (!clips.length) { showToast('Aggiungi almeno una clip', 'error'); return; }
+    // Load the video encoder only when actually exporting (keeps initial load light)
+    const { Output, Mp4OutputFormat, WebMOutputFormat, BufferTarget, CanvasSource, QUALITY_HIGH, getFirstEncodableVideoCodec } = await import('mediabunny');
     const st = settingsRef.current;
     const tier = EXPORT_TIERS[st.exportTier] || EXPORT_TIERS.fast;
     const fps = tier.fps;

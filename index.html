@@ -5,10 +5,23 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>GeoReel Generator | Geopolitical News Reels</title>
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&amp;family=Playfair+Display:wght@700&amp;family=Space+Grotesk:wght@500;600&amp;display=swap">
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <!-- Non-blocking font load: paint immediately, swap fonts in when ready -->
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&amp;family=Playfair+Display:wght@700&amp;family=Space+Grotesk:wght@500;600&amp;display=swap" media="print" onload="this.media='all'">
+    <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&amp;family=Playfair+Display:wght@700&amp;family=Space+Grotesk:wght@500;600&amp;display=swap"></noscript>
+    <style>
+      /* Instant splash shown before the JS bundle parses/mounts React */
+      #boot { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; background: #070b14; color: #94a3b8; font-family: system-ui, sans-serif; }
+      #boot .ring { width: 46px; height: 46px; border: 3px solid #1e293b; border-top-color: #ff3b3b; border-radius: 50%; animation: bspin .8s linear infinite; }
+      #boot .lbl { font-size: 13px; letter-spacing: .08em; text-transform: uppercase; }
+      @keyframes bspin { to { transform: rotate(360deg); } }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div id="boot"><div class="ring"></div><div class="lbl">GeoReel</div></div>
+    </div>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>
