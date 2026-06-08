@@ -7,7 +7,8 @@ import { motion, Reorder } from 'framer-motion';
 // mediabunny (video encoder, ~heavy) is loaded on demand inside the export fn.
 import {
   Play, Pause, Download, Image as ImageIcon, Plus, Trash2, Edit2,
-  MapPin, RotateCcw, Globe as GlobeIcon, Route, Grid3x3, Layers, Type, Clock, Cloud
+  MapPin, RotateCcw, Globe as GlobeIcon, Route, Grid3x3, Layers, Type, Clock, Cloud,
+  Film, Save, FolderOpen, X
 } from 'lucide-react';
 import { searchCountries } from './country-centroids.js';
 
@@ -79,10 +80,77 @@ const DEFAULT_THEME = {
     titleColor: '#f8fafc', textColor: '#cbd5e1', metaColor: '#94a3b8',
     bgColor: '#0b1220', bgOpacity: 0.92, accentColor: '#ff3b3b', borderWidth: 2,
     shadow: 1, titleUpper: false, titleSpacing: 0,
+    cardOffsetY: 0,   // px, positive = toward center from anchor
     transitionType: 'slide', transitionMs: 350,
     fields: { category: true, date: true, body: true, nation: true, source: true },
   },
 };
+
+// ---------- Visual config codec (save/load a compact alphanumeric code) ----------
+// IMPORTANT: when adding any new visual theme property, add it to themeToCode +
+// codeToTheme so the feature is covered by the save/load config system.
+const _CT = ['night','day','blue-marble','topology'];
+const _CF = ['Playfair Display','Space Grotesk','Inter'];
+const _CR = ['none','fade','slide','zoom'];
+const _CS = ['solid','dash','dot'];
+const _CP = ['top','center','bottom'];
+function themeToCode(t) {
+  const c = t.card||{}, rt = t.route||{}, fl = c.fields||{};
+  const o = {
+    v:2, TX:_CT.indexOf(t.texture||'night'), AC:(t.accent||'#ff3b3b').slice(1),
+    AT:Math.round((t.atmosphere||0)*100),
+    OC:(t.planetOverlayColor||'#000000').slice(1), OO:Math.round((t.planetOverlayOpacity||0)*100),
+    EC:(t.planetEmissive||'#000000').slice(1),     EI:Math.round((t.planetEmissiveInt||0)*100),
+    PS:Math.round((t.planetSaturation??1)*100),    Pc:Math.round((t.planetContrast??1)*100),
+    PB:Math.round((t.planetBrightness??1)*100),
+    SG:t.showGrid?1:0, GC:(t.gridColor||'#ff6b6b').slice(1), GO:Math.round((t.gridOpacity||0)*100),
+    Sb:t.showBorder?1:0, BC:(t.borderColor||'#ff3b3b').slice(1), BO:Math.round((t.borderOpacity||0)*100),
+    SR:t.showRoutes?1:0, RC:rt.color?rt.color.slice(1):'',
+    RK:Math.round((rt.stroke??0.5)*10), RA:Math.round((rt.alt??0.4)*100),
+    RL:_CS.indexOf(rt.style||'dash'), RM:rt.animated!==false?1:0, RO:Math.round((rt.opacity??0.85)*100),
+    SC:t.showCards?1:0, CP:_CP.indexOf(c.position||'bottom'), CA:c.align==='center'?1:0,
+    CW:c.width||304, CR:c.radius??16, CD:c.padding??16, CY:c.cardOffsetY||0,
+    TF:_CF.indexOf(c.titleFont||'Playfair Display'), BF:_CF.indexOf(c.bodyFont||'Inter'),
+    TS:Math.round(c.titleSize||16), XS:Math.round(c.textSize||12.5),
+    TL:Math.round((c.titleSpacing||0)*10), TU:c.titleUpper?1:0,
+    BG:(c.bgColor||'#0b1220').slice(1), Bq:Math.round((c.bgOpacity??0.92)*100),
+    TC:(c.titleColor||'#f8fafc').slice(1), XC:(c.textColor||'#cbd5e1').slice(1),
+    MC:(c.metaColor||'#94a3b8').slice(1), CC:(c.accentColor||'#ff3b3b').slice(1),
+    BW:c.borderWidth??2, SH:Math.round((c.shadow??1)*100),
+    TT:_CR.indexOf(c.transitionType||'slide'), TM:c.transitionMs||350,
+    CF:['category','date','body','nation','source'].reduce((m,k,i)=>m|(fl[k]?1<<i:0),0),
+  };
+  try { return 'GR-'+btoa(JSON.stringify(o)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=/g,''); }
+  catch { return ''; }
+}
+function codeToTheme(code) {
+  try {
+    const raw = code.trim().replace(/^GR-/,'');
+    const o = JSON.parse(atob(raw.replace(/-/g,'+').replace(/_/g,'/')+'=='));
+    if (o.v!==2) return null;
+    const fl = ['category','date','body','nation','source'].reduce((f,k,i)=>({...f,[k]:!!(o.CF&(1<<i))}),{});
+    return {
+      texture:_CT[o.TX]||'night', accent:'#'+o.AC,
+      atmosphere:o.AT/100, planetOverlayColor:'#'+(o.OC||'000000'), planetOverlayOpacity:o.OO/100,
+      planetEmissive:'#'+(o.EC||'000000'), planetEmissiveInt:o.EI/100,
+      planetSaturation:o.PS/100, planetContrast:o.Pc/100, planetBrightness:o.PB/100,
+      showGrid:!!o.SG, gridColor:'#'+o.GC, gridOpacity:o.GO/100,
+      showBorder:!!o.Sb, borderColor:'#'+o.BC, borderOpacity:o.BO/100,
+      heatmap:[],
+      showRoutes:!!o.SR,
+      route:{ color:o.RC?'#'+o.RC:null, stroke:o.RK/10, alt:o.RA/100,
+              style:_CS[o.RL]||'dash', animated:!!o.RM, opacity:o.RO/100 },
+      showCards:!!o.SC,
+      card:{ position:_CP[o.CP]||'bottom', align:o.CA?'center':'left',
+             width:o.CW, radius:o.CR, padding:o.CD, cardOffsetY:o.CY||0,
+             titleFont:_CF[o.TF]||'Playfair Display', bodyFont:_CF[o.BF]||'Inter',
+             titleSize:o.TS, textSize:o.XS, titleSpacing:o.TL/10, titleUpper:!!o.TU,
+             bgColor:'#'+o.BG, bgOpacity:o.Bq/100, titleColor:'#'+o.TC, textColor:'#'+o.XC,
+             metaColor:'#'+o.MC, accentColor:'#'+o.CC, borderWidth:o.BW, shadow:o.SH/100,
+             transitionType:_CR[o.TT]||'slide', transitionMs:o.TM, fields:fl },
+    };
+  } catch { return null; }
+}
 
 // Grayscale / cinematic grading applied to the globe only (preview: CSS filter on
 // the canvas; export: ctx.filter around the globe drawImage). Card stays untouched.
@@ -174,6 +242,33 @@ function buildGraticule(color, opacity) {
   const seg = new THREE.LineSegments(geo, mat);
   seg.renderOrder = 3; // above polygons (0 default) and overlay sphere (2)
   return seg;
+}
+
+// ---------- Media overlay canvas draw ----------
+const MEDIA_SIZES = { sm: 80, md: 115, lg: 160 };
+function drawMediaOnCanvas(ctx, el, cm, W, H, s, accentColor) {
+  if (!el || !cm) return;
+  const [aw, ah] = cm.aspect === '1x1' ? [1,1] : cm.aspect === '16x9' ? [16,9] : [9,16];
+  const mw = (MEDIA_SIZES[cm.sizeKey || 'sm'] || 80) * s;
+  const mh = mw * ah / aw;
+  const pad = 12 * s, ox = (cm.offsetX || 0) * s, oy = (cm.offsetY || 0) * s;
+  const pos = cm.position || 'br';
+  const mx = (pos === 'tr' || pos === 'br') ? W - mw - pad - ox : pad + ox;
+  const my = (pos === 'bl' || pos === 'br') ? H - mh - pad - oy : pad + oy;
+  const r = (cm.radius ?? 8) * s;
+  ctx.save();
+  ctx.globalAlpha = cm.opacity ?? 1;
+  roundRect(ctx, mx, my, mw, mh, r); ctx.clip();
+  try { ctx.drawImage(el, mx, my, mw, mh); } catch { /* cross-origin or not-loaded */ }
+  ctx.restore();
+  const bw = (cm.borderWidth ?? 2) * s;
+  if (bw > 0) {
+    ctx.save();
+    ctx.strokeStyle = cm.borderColor || accentColor;
+    ctx.lineWidth = bw;
+    roundRect(ctx, mx, my, mw, mh, r); ctx.stroke();
+    ctx.restore();
+  }
 }
 
 // ---------- Canvas text wrap ----------
@@ -411,11 +506,17 @@ function App() {
   const [formError, setFormError] = useState('');
   const [exportPct, setExportPct] = useState(0);
   const [introActive, setIntroActive] = useState(false);
-  const [cardSeq, setCardSeq] = useState(0); // forces card re-animation each playStep
-  // Heatmap add-row state
+  const [cardSeq, setCardSeq] = useState(0);
+  // Heatmap
   const [heatQuery, setHeatQuery] = useState('');
   const [heatSugg, setHeatSugg] = useState([]);
   const [heatColor, setHeatColor] = useState('#ef4444');
+  // Save / load config
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [importCode, setImportCode] = useState('');
+  const [importError, setImportError] = useState('');
+  // Media overlay: blob URLs keyed by clip id (not persisted to localStorage)
+  const [mediaUrls, setMediaUrls] = useState({});
 
   const globeEl = useRef(null);
   const globeInstance = useRef(null);
@@ -425,6 +526,7 @@ function App() {
   const countryCache = useRef({});
   const pulseRef = useRef(1);
   const cardTransRef = useRef({ active: false, start: 0, dur: 350, type: 'slide' });
+  const mediaElsRef = useRef({}); // { [clipId]: HTMLVideoElement | HTMLImageElement }
   const outroRef = useRef({ active: false, start: 0, dur: 0, type: 'none' });
 
   const pickingRef = useRef(false);
@@ -466,7 +568,13 @@ function App() {
   const removeHeat = (id) => setTheme(t => ({ ...t, heatmap: (t.heatmap || []).filter(h => h.id !== id) }));
 
   // Persist
-  useEffect(() => { try { localStorage.setItem('georeel-news', JSON.stringify(news)); } catch { /* ignore */ } }, [news]);
+  useEffect(() => {
+    try {
+      // Strip blob URLs (session-only) before persisting; clipMedia settings are kept.
+      const storable = news.map(n => n.clipMedia ? { ...n, clipMedia: { ...n.clipMedia, url: undefined } } : n);
+      localStorage.setItem('georeel-news', JSON.stringify(storable));
+    } catch { /* ignore */ }
+  }, [news]);
   useEffect(() => { try { localStorage.setItem('georeel-theme-v2', JSON.stringify(theme)); } catch { /* ignore */ } }, [theme]);
   useEffect(() => { try { localStorage.setItem('georeel-settings-v1', JSON.stringify(settings)); } catch { /* ignore */ } }, [settings]);
 
@@ -750,9 +858,14 @@ function App() {
     const s = settingsRef.current;
     cardTransRef.current = { active: true, start: nowMs(), dur: c.transitionMs ?? 350, type: c.transitionType ?? 'slide' };
     setCurrentIndex(idx);
-    setCardSeq(n => n + 1); // re-trigger card entrance even when index is unchanged
+    setCardSeq(n => n + 1);
     const item = list[idx];
     cinematicTo(item);
+    // Start media overlay video for this clip
+    if (item?.clipMedia?.visible !== false) {
+      const mEl = mediaElsRef.current[item.id];
+      if (mEl instanceof HTMLVideoElement) { mEl.currentTime = 0; mEl.play().catch(() => {}); }
+    }
     // Arm satellite drift once the dolly-in settles (geo clips hold over the target;
     // info clips keep drifting around the previous position).
     holdRef.current = { ...holdRef.current, active: false };
@@ -804,20 +917,38 @@ function App() {
     playState.current = { playing: false, slideTimer: null, zoomTimer: null, driftTimer: null, introRaf: null };
     setIntroActive(false);
     setIsPlaying(false);
+    // Pause all media overlay videos
+    Object.values(mediaElsRef.current).forEach(el => { if (el instanceof HTMLVideoElement) { el.pause(); el.currentTime = 0; } });
     if (globeInstance.current) globeInstance.current.controls().autoRotate = settingsRef.current.autoSpin;
   };
   const togglePlay = () => (isPlaying ? stopPreview() : startPreview());
+
+  const saveConfig = async () => {
+    const code = themeToCode(themeRef.current);
+    if (!code) { showToast('Errore nella generazione del codice', 'error'); return; }
+    try { await navigator.clipboard.writeText(code); showToast('Configurazione copiata negli appunti ✓'); }
+    catch { showToast('Copia manuale: ' + code.slice(0, 20) + '…', 'error'); }
+  };
+  const applyImportCode = () => {
+    const result = codeToTheme(importCode);
+    if (!result) { setImportError('Codice non valido o versione incompatibile'); return; }
+    setTheme(prev => ({ ...result, heatmap: prev.heatmap || [], card: { ...result.card } }));
+    setShowImportModal(false); setImportCode(''); setImportError('');
+    showToast('Configurazione applicata ✓');
+  };
   const selectNews = (index) => { setCurrentIndex(index); cinematicTo(news[index]); };
 
   // CRUD
   const openAddModal = () => {
+    const id = newId();
     setEditingNews(null); setFormError(''); setCountryQuery(''); setCountrySuggestions([]);
-    setFormData({ title: '', text: '', category: 'Conflitto', date: todayISO(), source: '', nation: '', lat: 41.9028, lng: 12.4964 });
+    setFormData({ id, title: '', text: '', category: 'Conflitto', date: todayISO(), source: '', nation: '', lat: 41.9028, lng: 12.4964 });
     setShowModal(true); setIsPickingLocation(false);
   };
   const openAddInfo = () => {
+    const id = newId();
     setEditingNews(null); setFormError(''); setCountryQuery(''); setCountrySuggestions([]);
-    setFormData({ title: 'Titolo info', text: 'Testo descrittivo aggiuntivo…', type: 'info', category: 'Info', date: '', source: '', nation: '', lat: null, lng: null });
+    setFormData({ id, title: 'Titolo info', text: 'Testo descrittivo aggiuntivo…', type: 'info', category: 'Info', date: '', source: '', nation: '', lat: null, lng: null });
     setShowModal(true); setIsPickingLocation(false);
   };
   const openEditModal = (item) => {
@@ -829,10 +960,35 @@ function App() {
   const saveNews = () => {
     if (!formData.title.trim() || !formData.text.trim()) { setFormError('Titolo e descrizione sono obbligatori'); return; }
     const isInfo = formData.type === 'info';
-    const item = { ...formData, id: editingNews ? editingNews.id : newId(),
+    const savedId = editingNews ? editingNews.id : (formData.id || newId());
+    const item = { ...formData, id: savedId,
       lat: isInfo ? null : parseFloat(formData.lat), lng: isInfo ? null : parseFloat(formData.lng) };
+    // Promote media URL from temp id (new clips) to real id
+    if (!editingNews && mediaUrls[formData.id]) {
+      setMediaUrls(prev => { const { [formData.id]: url, ...rest } = prev; return { ...rest, [savedId]: url }; });
+    }
     setNews(prev => editingNews ? prev.map(n => n.id === editingNews.id ? item : n) : [...prev, item]);
     closeModal();
+  };
+  const handleMediaUpload = (file) => {
+    if (!file) return;
+    const url = URL.createObjectURL(file);
+    const type = file.type.startsWith('video') ? 'video' : 'image';
+    setMediaUrls(prev => ({ ...prev, [formData.id]: url }));
+    setFormData(prev => ({
+      ...prev,
+      clipMedia: {
+        visible: true, position: 'br', sizeKey: 'sm', aspect: '9x16',
+        offsetX: 0, offsetY: 0, opacity: 1, radius: 8,
+        borderWidth: 2, borderColor: null,
+        ...(prev.clipMedia || {}),
+        type, fileName: file.name,
+      },
+    }));
+  };
+  const removeMedia = () => {
+    setMediaUrls(prev => { const c = { ...prev }; delete c[formData.id]; return c; });
+    setFormData(prev => ({ ...prev, clipMedia: null }));
   };
   const deleteNews = (id) => showConfirm('Eliminare questa clip?', () => {
     setNews(prev => { const f = prev.filter(n => n.id !== id); if (currentIndex >= f.length) setCurrentIndex(Math.max(0, f.length - 1)); return f; });
@@ -889,9 +1045,10 @@ function App() {
 
     const cx = (360 * s - cw) / 2;
     let cy;
-    if (c.position === 'top') cy = 30 * s;
-    else if (c.position === 'center') cy = (640 * s - h) / 2;
-    else cy = (640 - 30) * s - h;
+    const posShift = (c.cardOffsetY || 0) * s;
+    if (c.position === 'top') cy = 30 * s + posShift;
+    else if (c.position === 'center') cy = (640 * s - h) / 2 + posShift;
+    else cy = (640 - 30) * s - h - posShift; // positive = up from bottom
     cy += offsetY;
 
     // background
@@ -1090,6 +1247,26 @@ function App() {
       setIsExporting(false); setExportPct(0);
     };
 
+    // Build offscreen media elements for the export (images loaded, videos seekable).
+    const capturedMediaUrls = { ...mediaUrls };
+    const exportMediaMap = {}; // { clipIdx: { el, cm } }
+    clips.forEach((clip, i) => {
+      const url = capturedMediaUrls[clip.id];
+      const cm = clip.clipMedia;
+      if (!url || !cm || cm.visible === false) return;
+      if (cm.type === 'video') {
+        const v = document.createElement('video');
+        v.src = url; v.muted = true; v.crossOrigin = 'anonymous'; v.preload = 'auto';
+        exportMediaMap[i] = { el: v, cm };
+      } else {
+        const img = new Image(); img.src = url; img.crossOrigin = 'anonymous';
+        exportMediaMap[i] = { el: img, cm };
+      }
+    });
+    await Promise.all(Object.values(exportMediaMap)
+      .filter(({ el }) => el instanceof HTMLImageElement)
+      .map(({ el }) => new Promise(res => { el.onload = res; el.onerror = res; })));
+
     try {
       await output.start();
       const th = themeRef.current;
@@ -1100,8 +1277,6 @@ function App() {
       let lastClipIdx = -1;
       let hasConflictPoly = (th.heatmap || []).some(h => h.conflict);
       const planetFx = planetFilter(th);
-      // Pipelined: kick off encoding for frame f while rendering frame f+1.
-      // source.add() captures the canvas synchronously (snapshot) then encodes async.
       let pendingEncode = null;
 
       for (let f = 0; f < totalFrames; f++) {
@@ -1111,13 +1286,14 @@ function App() {
         const item = clips[clip] || null;
         currentNewsRef.current = item;
 
-        // Country polygons (heatmap + active border): rebuild once per clip change
+        // Country polygons: rebuild per clip change
         if (clip !== lastClipIdx) {
           lastClipIdx = clip;
           setPolygons(gInst, buildPolygons(countryCache, item, th), th, pulseAt(tms));
         }
-        // Animate conflict-country color pulse every frame
-        if (hasConflictPoly) applyPolyColors(gInst, th, pulseAt(tms));
+        // Conflict pulse: update every 6 frames (smooth ~5-10Hz, avoids per-frame
+        // polygon material rebuild which caused choppy export).
+        if (hasConflictPoly && f % 6 === 0) applyPolyColors(gInst, th, pulseAt(tms));
 
         // Deterministic arc dash advance (matches live speed: 1 unit / ARC_PERIOD ms)
         const dashVal = tms / ARC_PERIOD;
@@ -1144,6 +1320,10 @@ function App() {
         } else {
           drawCard(ctx, s, item, drawAlpha, offsetY);
         }
+        // Media overlay
+        const mEntry = exportMediaMap[clip];
+        if (mEntry && alpha > 0) drawMediaOnCanvas(ctx, mEntry.el, mEntry.cm, W, H, s, th.accent);
+
         if (fadeBlack > 0) { ctx.fillStyle = `rgba(0,0,0,${fadeBlack})`; ctx.fillRect(0, 0, W, H); }
 
         // Pipeline: await previous encode, then kick off this frame's encode.
@@ -1255,7 +1435,12 @@ function App() {
 
   const currentNews = news[currentIndex] || null;
   const fmtSec = (ms) => (ms / 1000).toFixed(1) + 's';
-  const slotStyle = card.position === 'top' ? { top: 30 } : card.position === 'center' ? { top: '50%', transform: 'translateY(-50%)' } : { bottom: 30 };
+  const _coy = card.cardOffsetY || 0;
+  const slotStyle = card.position === 'top'
+    ? { top: 30, transform: `translateY(${_coy}px)` }
+    : card.position === 'center'
+    ? { top: '50%', transform: `translateY(calc(-50% + ${_coy}px))` }
+    : { bottom: 30, transform: `translateY(${-_coy}px)` };
 
   return (
     <div className="h-screen overflow-hidden text-slate-200 flex flex-col" style={{ '--accent': accent }}>
@@ -1360,6 +1545,30 @@ function App() {
                 {news.map((_, i) => <div key={i} className="h-1 rounded-full transition-all" style={{ width: i === currentIndex ? 18 : 6, background: i === currentIndex ? accent : 'rgba(255,255,255,0.3)' }} />)}
               </div>
             )}
+            {/* Media overlays */}
+            {news.map(item => {
+              const cm = item.clipMedia;
+              const url = mediaUrls[item.id];
+              if (!cm || !url || cm.visible === false) return null;
+              const isActive = item.id === currentNews?.id;
+              const [aw, ah] = cm.aspect === '1x1' ? [1,1] : cm.aspect === '16x9' ? [16,9] : [9,16];
+              const mw = MEDIA_SIZES[cm.sizeKey || 'sm'] || 80;
+              const mh = Math.round(mw * ah / aw);
+              const pos = cm.position || 'br';
+              const ox = cm.offsetX || 0, oy = cm.offsetY || 0;
+              const posStyle = pos === 'tl' ? { top: 12 + oy, left: 12 + ox }
+                : pos === 'tr' ? { top: 12 + oy, right: 12 + ox }
+                : pos === 'bl' ? { bottom: 12 + oy, left: 12 + ox }
+                : { bottom: 12 + oy, right: 12 + ox };
+              return (
+                <div key={item.id} style={{ display: isActive ? 'block' : 'none', position: 'absolute', width: mw, height: mh, borderRadius: cm.radius ?? 8, overflow: 'hidden', opacity: cm.opacity ?? 1, border: (cm.borderWidth ?? 2) > 0 ? `${cm.borderWidth ?? 2}px solid ${cm.borderColor || accent}` : 'none', boxShadow: '0 4px 20px rgba(0,0,0,0.5)', zIndex: 45, ...posStyle }}>
+                  {cm.type === 'video'
+                    ? <video ref={el => { if (el) mediaElsRef.current[item.id] = el; else delete mediaElsRef.current[item.id]; }} src={url} muted loop playsInline style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+                    : <img ref={el => { if (el) mediaElsRef.current[item.id] = el; else delete mediaElsRef.current[item.id]; }} src={url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+                  }
+                </div>
+              );
+            })}
           </div>
           </div>
           <Timeline news={news} currentIndex={currentIndex} settings={settings} accent={accent}
@@ -1431,6 +1640,14 @@ function App() {
                   <Slider label="Drift satellite (fermo)" value={Math.round((settings.driftIntensity ?? 0) * 100)} min={0} max={100} step={5} display={settings.driftIntensity > 0 ? `${Math.round((settings.driftIntensity ?? 0) * 100)}%` : 'Off'} onChange={(v) => setSettings(s => ({ ...s, driftIntensity: v / 100 }))} />
                 </div>
                 <button onClick={resetCamera} className="w-full py-2.5 text-xs rounded-2xl border border-slate-800 hover:bg-slate-800 flex items-center justify-center gap-2"><RotateCcw className="w-3.5 h-3.5" /> RESET CAMERA</button>
+                <div className="space-y-2">
+                  <div className="uppercase tracking-wider text-[11px] font-semibold text-slate-400 mb-1">Configurazione</div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button onClick={saveConfig} className="flex items-center justify-center gap-1.5 py-2.5 rounded-2xl border border-slate-800 hover:bg-slate-800 text-xs" style={{ color: accent }}><Save className="w-3.5 h-3.5" /> Salva</button>
+                    <button onClick={() => { setImportCode(''); setImportError(''); setShowImportModal(true); }} className="flex items-center justify-center gap-1.5 py-2.5 rounded-2xl border border-slate-800 hover:bg-slate-800 text-xs text-slate-300"><FolderOpen className="w-3.5 h-3.5" /> Importa</button>
+                  </div>
+                  <div className="text-[9px] text-slate-600 leading-snug">Salva copia un codice negli appunti. Importa applica un codice incollato.</div>
+                </div>
                 <div>
                   <div className="uppercase tracking-wider text-[11px] font-semibold text-slate-400 mb-3">Esporta</div>
                   {HQ_AVAILABLE && (
@@ -1595,8 +1812,12 @@ function App() {
                   {card.transitionType !== 'none' && <Slider label="Durata animazione" value={card.transitionMs} min={100} max={900} step={50} display={`${card.transitionMs}ms`} onChange={(v) => setCard({ transitionMs: v })} />}
                 </div>
                 <div>
-                  <div className="text-[11px] text-slate-400 mb-2">Posizione</div>
+                  <div className="text-[11px] text-slate-400 mb-2">Posizione verticale</div>
                   <Seg value={card.position} onChange={(v) => setCard({ position: v })} options={[{ v: 'top', label: 'Alto' }, { v: 'center', label: 'Centro' }, { v: 'bottom', label: 'Basso' }]} />
+                  <div className="mt-2.5">
+                    <Slider label="Scostamento Y" value={card.cardOffsetY || 0} min={-280} max={280} step={4} display={`${card.cardOffsetY > 0 ? '+' : ''}${card.cardOffsetY || 0}px`} onChange={(v) => setCard({ cardOffsetY: v })} />
+                    <div className="text-[9px] text-slate-600 mt-0.5">Positivo = verso il centro dello schermo</div>
+                  </div>
                 </div>
                 <div>
                   <div className="text-[11px] text-slate-400 mb-2">Allineamento testo</div>
@@ -1727,6 +1948,99 @@ function App() {
                 </div>
                 </>}
                 {formData.type === 'info' && <div className="text-[11px] text-slate-500 bg-slate-800/40 rounded-xl px-4 py-3">Le card info non si spostano sul globo: la camera resta ferma sulla posizione precedente. Stile e font si regolano dalla tab <span className="text-slate-300">Card</span>.</div>}
+                {/* Media overlay section */}
+                <div className="border-t border-slate-800 pt-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1.5"><Film className="w-3.5 h-3.5" /> Media overlay</div>
+                    {(formData.clipMedia && mediaUrls[formData.id]) ? (
+                      <button onClick={removeMedia} className="text-[10px] text-red-400 hover:text-red-300 flex items-center gap-1"><X className="w-3 h-3" /> Rimuovi</button>
+                    ) : (
+                      <label className="cursor-pointer text-[10px] px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 flex items-center gap-1" style={{ color: accent }}>
+                        <Plus className="w-3 h-3" /> Aggiungi video/foto
+                        <input type="file" accept="image/*,video/*" className="hidden" onChange={e => handleMediaUpload(e.target.files[0])} />
+                      </label>
+                    )}
+                  </div>
+                  {formData.clipMedia && mediaUrls[formData.id] && (
+                    <div className="space-y-2.5 bg-slate-800/40 rounded-xl p-3">
+                      <div className="text-[10px] text-slate-400 truncate flex items-center gap-1"><Film className="w-3 h-3 flex-shrink-0" />{formData.clipMedia.fileName}</div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <div className="text-[10px] text-slate-500 mb-1">Posizione</div>
+                          <div className="grid grid-cols-2 gap-1">
+                            {[['tl','↖ SX alto'],['tr','↗ DX alto'],['bl','↙ SX basso'],['br','↘ DX basso']].map(([v,l]) => (
+                              <button key={v} onClick={() => setFormData(p=>({...p,clipMedia:{...p.clipMedia,position:v}}))}
+                                className={`py-1 text-[9px] rounded-lg border transition-colors ${formData.clipMedia?.position===v ? '' : 'border-slate-700 text-slate-400'}`}
+                                style={formData.clipMedia?.position===v ? {borderColor:accent,background:accent+'22',color:accent} : {}}>{l}</button>
+                            ))}
+                          </div>
+                        </div>
+                        <div className="space-y-2">
+                          <div>
+                            <div className="text-[10px] text-slate-500 mb-1">Formato</div>
+                            <div className="flex gap-1">
+                              {[['9x16','9:16'],['1x1','1:1'],['16x9','16:9']].map(([v,l]) => (
+                                <button key={v} onClick={() => setFormData(p=>({...p,clipMedia:{...p.clipMedia,aspect:v}}))}
+                                  className={`flex-1 py-1 text-[9px] rounded-lg border transition-colors ${formData.clipMedia?.aspect===v ? '' : 'border-slate-700 text-slate-400'}`}
+                                  style={formData.clipMedia?.aspect===v ? {borderColor:accent,background:accent+'22',color:accent} : {}}>{l}</button>
+                              ))}
+                            </div>
+                          </div>
+                          <div>
+                            <div className="text-[10px] text-slate-500 mb-1">Dimensione</div>
+                            <div className="flex gap-1">
+                              {[['sm','S'],['md','M'],['lg','L']].map(([v,l]) => (
+                                <button key={v} onClick={() => setFormData(p=>({...p,clipMedia:{...p.clipMedia,sizeKey:v}}))}
+                                  className={`flex-1 py-1 text-[9px] rounded-lg border transition-colors ${formData.clipMedia?.sizeKey===v ? '' : 'border-slate-700 text-slate-400'}`}
+                                  style={formData.clipMedia?.sizeKey===v ? {borderColor:accent,background:accent+'22',color:accent} : {}}>{l}</button>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <div className="text-[10px] text-slate-500 mb-1">Offset X</div>
+                          <input type="range" min={-60} max={120} step={2} value={formData.clipMedia?.offsetX||0} onChange={e=>setFormData(p=>({...p,clipMedia:{...p.clipMedia,offsetX:+e.target.value}}))} className="w-full" />
+                          <div className="text-[9px] text-slate-500 text-right font-mono">{formData.clipMedia?.offsetX||0}px</div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] text-slate-500 mb-1">Offset Y</div>
+                          <input type="range" min={-60} max={120} step={2} value={formData.clipMedia?.offsetY||0} onChange={e=>setFormData(p=>({...p,clipMedia:{...p.clipMedia,offsetY:+e.target.value}}))} className="w-full" />
+                          <div className="text-[9px] text-slate-500 text-right font-mono">{formData.clipMedia?.offsetY||0}px</div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <div className="flex-1">
+                          <div className="text-[10px] text-slate-500 mb-1">Opacità</div>
+                          <input type="range" min={10} max={100} step={5} value={Math.round((formData.clipMedia?.opacity??1)*100)} onChange={e=>setFormData(p=>({...p,clipMedia:{...p.clipMedia,opacity:+e.target.value/100}}))} className="w-full" />
+                        </div>
+                        <div className="flex-1">
+                          <div className="text-[10px] text-slate-500 mb-1">Bordo</div>
+                          <input type="range" min={0} max={6} step={1} value={formData.clipMedia?.borderWidth??2} onChange={e=>setFormData(p=>({...p,clipMedia:{...p.clipMedia,borderWidth:+e.target.value}}))} className="w-full" />
+                        </div>
+                        <div className="flex-shrink-0 flex flex-col items-center gap-1">
+                          <div className="text-[10px] text-slate-500">Colore</div>
+                          <input type="color" value={formData.clipMedia?.borderColor||accent} onChange={e=>setFormData(p=>({...p,clipMedia:{...p.clipMedia,borderColor:e.target.value}}))} className="w-7 h-7 rounded-lg bg-transparent border border-slate-700 p-0.5" />
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-[10px] text-slate-500 mb-1">Arrotondamento</div>
+                        <input type="range" min={0} max={24} step={1} value={formData.clipMedia?.radius??8} onChange={e=>setFormData(p=>({...p,clipMedia:{...p.clipMedia,radius:+e.target.value}}))} className="w-full" />
+                      </div>
+                      <button onClick={()=>setFormData(p=>({...p,clipMedia:{...p.clipMedia,visible:!(p.clipMedia?.visible!==false)}}))}
+                        className={`w-full py-2 rounded-xl text-xs border transition-colors ${formData.clipMedia?.visible!==false ? '' : 'border-slate-700 text-slate-500'}`}
+                        style={formData.clipMedia?.visible!==false ? {borderColor:accent,background:accent+'1a',color:accent} : {}}>
+                        {formData.clipMedia?.visible!==false ? 'Overlay: ON' : 'Overlay: OFF'}
+                      </button>
+                    </div>
+                  )}
+                  {formData.clipMedia && !mediaUrls[formData.id] && (
+                    <div className="text-[10px] text-slate-500 bg-slate-800/40 rounded-xl px-3 py-2">
+                      File precedente "{formData.clipMedia.fileName}" non disponibile dopo il reload. Carica di nuovo per riattivarlo.
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
             <div className="bg-slate-950 px-7 py-4 flex gap-3 border-t border-slate-700">
@@ -1761,6 +2075,30 @@ function App() {
             <div className="flex gap-3">
               <button onClick={() => setConfirmDialog(null)} className="flex-1 py-2.5 rounded-xl border border-slate-700 hover:bg-slate-800 text-sm">Annulla</button>
               <button onClick={() => { confirmDialog.onConfirm(); setConfirmDialog(null); }} className="flex-1 py-2.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-sm font-semibold">Conferma</button>
+            </div>
+          </motion.div>
+        </div>
+      )}
+
+      {showImportModal && (
+        <div className="fixed inset-0 bg-black/90 z-[260] flex items-center justify-center p-6" onClick={() => setShowImportModal(false)}>
+          <motion.div initial={{ opacity: 0, scale: 0.96 }} animate={{ opacity: 1, scale: 1 }} className="bg-slate-900 rounded-2xl border border-slate-700 p-6 max-w-md w-full" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <div className="text-base font-semibold flex items-center gap-2"><FolderOpen className="w-4 h-4" style={{ color: accent }} /> Importa configurazione</div>
+              <button onClick={() => setShowImportModal(false)} className="text-slate-400 hover:text-white"><X className="w-4 h-4" /></button>
+            </div>
+            <p className="text-[11px] text-slate-400 mb-3 leading-snug">Incolla un codice di configurazione GeoReel (<span className="font-mono text-slate-300">GR-…</span>). Sostituisce tutte le impostazioni visive; le notizie e i media rimangono.</p>
+            <textarea
+              value={importCode}
+              onChange={e => { setImportCode(e.target.value); setImportError(''); }}
+              placeholder="GR-eyJ2Ij…"
+              rows={4}
+              className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2.5 text-xs font-mono text-slate-200 focus:outline-none focus:border-slate-500 resize-none"
+            />
+            {importError && <p className="text-red-400 text-xs mt-2">{importError}</p>}
+            <div className="flex gap-3 mt-4">
+              <button onClick={() => setShowImportModal(false)} className="flex-1 py-2.5 rounded-xl border border-slate-700 hover:bg-slate-800 text-sm">Annulla</button>
+              <button onClick={applyImportCode} className="flex-1 py-2.5 rounded-xl text-black font-semibold text-sm" style={{ background: accent }}>APPLICA</button>
             </div>
           </motion.div>
         </div>
