@@ -8,9 +8,10 @@ import { motion, Reorder } from 'framer-motion';
 import {
   Play, Pause, Download, Image as ImageIcon, Plus, Trash2, Edit2,
   MapPin, RotateCcw, Globe as GlobeIcon, Route, Grid3x3, Layers, Type, Clock, Cloud,
-  Film, Save, FolderOpen, X
+  Film, Save, FolderOpen, X, Megaphone, Flag, Sparkles, Award, Smartphone
 } from 'lucide-react';
 import { searchCountries } from './country-centroids.js';
+import { flagFor } from './flags.js';
 
 const CATEGORY_COLORS = {
   'Economia': '#22c55e',
@@ -81,9 +82,19 @@ const DEFAULT_THEME = {
     bgColor: '#0b1220', bgOpacity: 0.92, accentColor: '#ff3b3b', borderWidth: 2,
     shadow: 1, titleUpper: false, titleSpacing: 0,
     cardOffsetY: 0,   // px, positive = toward center from anchor
+    highlightColor: null, // **word** highlight in title; null = accentColor
     transitionType: 'slide', transitionMs: 350,
     fields: { category: true, date: true, body: true, nation: true, source: true },
   },
+  // --- v2.0 overlays ---
+  chyron: {
+    on: false, text: 'ULTIME NOTIZIE • AGGIORNAMENTI IN DIRETTA', label: 'BREAKING',
+    bg: '#cc0a0a', color: '#ffffff', labelBg: '#ffffff', labelColor: '#cc0a0a',
+    position: 'top', height: 26, size: 11, speed: 60,
+  },
+  brand: { on: false, text: '@georeel', color: '#ffffff', opacity: 0.8, size: 12, position: 'tl' },
+  episode: { on: false, text: 'EP. 1', bg: '#ff3b3b', color: '#ffffff', position: 'tr', size: 11 },
+  countryLabel: { on: false, flag: true, size: 11, color: '#ffffff', bgOpacity: 0.7 },
 };
 
 // ---------- Visual config codec (save/load a compact alphanumeric code) ----------
@@ -91,13 +102,18 @@ const DEFAULT_THEME = {
 // codeToTheme so the feature is covered by the save/load config system.
 const _CT = ['night','day','blue-marble','topology'];
 const _CF = ['Playfair Display','Space Grotesk','Inter'];
-const _CR = ['none','fade','slide','zoom'];
+const _CR = ['none','fade','slide','zoom','words'];
 const _CS = ['solid','dash','dot'];
 const _CP = ['top','center','bottom'];
+const _C4 = ['tl','tr','bl','br'];
+// UTF-8 safe base64 (chyron/watermark text can contain accents/emoji)
+const _b64e = (str) => btoa(unescape(encodeURIComponent(str)));
+const _b64d = (str) => decodeURIComponent(escape(atob(str)));
 function themeToCode(t) {
   const c = t.card||{}, rt = t.route||{}, fl = c.fields||{};
+  const ch = t.chyron||{}, br = t.brand||{}, ep = t.episode||{}, cl = t.countryLabel||{};
   const o = {
-    v:2, TX:_CT.indexOf(t.texture||'night'), AC:(t.accent||'#ff3b3b').slice(1),
+    v:3, TX:_CT.indexOf(t.texture||'night'), AC:(t.accent||'#ff3b3b').slice(1),
     AT:Math.round((t.atmosphere||0)*100),
     OC:(t.planetOverlayColor||'#000000').slice(1), OO:Math.round((t.planetOverlayOpacity||0)*100),
     EC:(t.planetEmissive||'#000000').slice(1),     EI:Math.round((t.planetEmissiveInt||0)*100),
@@ -118,16 +134,28 @@ function themeToCode(t) {
     MC:(c.metaColor||'#94a3b8').slice(1), CC:(c.accentColor||'#ff3b3b').slice(1),
     BW:c.borderWidth??2, SH:Math.round((c.shadow??1)*100),
     TT:_CR.indexOf(c.transitionType||'slide'), TM:c.transitionMs||350,
+    HC:c.highlightColor?c.highlightColor.slice(1):'',
     CF:['category','date','body','nation','source'].reduce((m,k,i)=>m|(fl[k]?1<<i:0),0),
+    // v3 overlays
+    Ch:ch.on?1:0, Ct:ch.text||'', Cl:ch.label||'', Cb:(ch.bg||'#cc0a0a').slice(1),
+    Cc:(ch.color||'#ffffff').slice(1), Lb:(ch.labelBg||'#ffffff').slice(1), Lc:(ch.labelColor||'#cc0a0a').slice(1),
+    Cq:ch.position==='bottom'?1:0, Cz:ch.height??26, Cs:ch.size??11, Cv:ch.speed??60,
+    Wn:br.on?1:0, Wt:br.text||'', Wc:(br.color||'#ffffff').slice(1),
+    Wo:Math.round((br.opacity??0.8)*100), Ws:br.size??12, Wp:_C4.indexOf(br.position||'tl'),
+    En:ep.on?1:0, Et:ep.text||'', Eb:(ep.bg||'#ff3b3b').slice(1), Ec2:(ep.color||'#ffffff').slice(1),
+    Ep:_C4.indexOf(ep.position||'tr'), Es:ep.size??11,
+    Kn:cl.on?1:0, Kf:cl.flag!==false?1:0, Ks:cl.size??11, Kc:(cl.color||'#ffffff').slice(1),
+    Ko:Math.round((cl.bgOpacity??0.7)*100),
   };
-  try { return 'GR-'+btoa(JSON.stringify(o)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=/g,''); }
+  try { return 'GR-'+_b64e(JSON.stringify(o)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=/g,''); }
   catch { return ''; }
 }
 function codeToTheme(code) {
   try {
     const raw = code.trim().replace(/^GR-/,'');
-    const o = JSON.parse(atob(raw.replace(/-/g,'+').replace(/_/g,'/')+'=='));
-    if (o.v!==2) return null;
+    const pad = raw.length % 4 === 0 ? '' : '='.repeat(4 - raw.length % 4);
+    const o = JSON.parse(_b64d(raw.replace(/-/g,'+').replace(/_/g,'/')+pad));
+    if (o.v!==2 && o.v!==3) return null;
     const fl = ['category','date','body','nation','source'].reduce((f,k,i)=>({...f,[k]:!!(o.CF&(1<<i))}),{});
     return {
       texture:_CT[o.TX]||'night', accent:'#'+o.AC,
@@ -147,7 +175,17 @@ function codeToTheme(code) {
              titleSize:o.TS, textSize:o.XS, titleSpacing:o.TL/10, titleUpper:!!o.TU,
              bgColor:'#'+o.BG, bgOpacity:o.Bq/100, titleColor:'#'+o.TC, textColor:'#'+o.XC,
              metaColor:'#'+o.MC, accentColor:'#'+o.CC, borderWidth:o.BW, shadow:o.SH/100,
+             highlightColor:o.HC?'#'+o.HC:null,
              transitionType:_CR[o.TT]||'slide', transitionMs:o.TM, fields:fl },
+      chyron: o.v>=3 ? { on:!!o.Ch, text:o.Ct, label:o.Cl, bg:'#'+o.Cb, color:'#'+o.Cc,
+                         labelBg:'#'+o.Lb, labelColor:'#'+o.Lc, position:o.Cq?'bottom':'top',
+                         height:o.Cz, size:o.Cs, speed:o.Cv } : { ...DEFAULT_THEME.chyron },
+      brand: o.v>=3 ? { on:!!o.Wn, text:o.Wt, color:'#'+o.Wc, opacity:o.Wo/100,
+                        size:o.Ws, position:_C4[o.Wp]||'tl' } : { ...DEFAULT_THEME.brand },
+      episode: o.v>=3 ? { on:!!o.En, text:o.Et, bg:'#'+o.Eb, color:'#'+o.Ec2,
+                          position:_C4[o.Ep]||'tr', size:o.Es } : { ...DEFAULT_THEME.episode },
+      countryLabel: o.v>=3 ? { on:!!o.Kn, flag:!!o.Kf, size:o.Ks, color:'#'+o.Kc,
+                               bgOpacity:o.Ko/100 } : { ...DEFAULT_THEME.countryLabel },
     };
   } catch { return null; }
 }
@@ -269,6 +307,167 @@ function drawMediaOnCanvas(ctx, el, cm, W, H, s, accentColor) {
     roundRect(ctx, mx, my, mw, mh, r); ctx.stroke();
     ctx.restore();
   }
+}
+
+// ---------- Title tokens: **word** = highlighted; word-level layout enables
+// keyword color + kinetic word-by-word reveal in BOTH preview and export ----------
+function tokenizeTitle(text) {
+  const out = [];
+  for (const part of (text || '').split(/(\*\*[^*]+\*\*)/g)) {
+    if (!part) continue;
+    const hl = part.startsWith('**') && part.endsWith('**');
+    const clean = hl ? part.slice(2, -2) : part;
+    for (const w of clean.split(/\s+/).filter(Boolean)) out.push({ t: w, hl });
+  }
+  return out;
+}
+// Lays out tokens into lines of {t, hl, x} fitting maxW; ellipsis on overflow.
+function layoutTitle(ctx, tokens, maxW, maxLines) {
+  const spaceW = ctx.measureText(' ').width;
+  const lines = [];
+  let cur = [], curW = 0;
+  for (let i = 0; i < tokens.length; i++) {
+    const w = ctx.measureText(tokens[i].t).width;
+    const add = cur.length ? spaceW + w : w;
+    if (cur.length && curW + add > maxW) {
+      lines.push(cur);
+      if (lines.length === maxLines) {
+        const last = lines[maxLines - 1];
+        if (last.length) last[last.length - 1] = { ...last[last.length - 1], t: last[last.length - 1].t + '…' };
+        return lines;
+      }
+      cur = [{ ...tokens[i], x: 0 }]; curW = w;
+    } else {
+      cur.push({ ...tokens[i], x: cur.length ? curW + spaceW : 0 });
+      curW += add;
+    }
+  }
+  if (cur.length) lines.push(cur);
+  return lines;
+}
+
+// ---------- v2.0 overlay draws (chyron / brand / episode / country label) ----------
+// All deterministic from tms so preview & export match.
+const kineticAlpha = (tIn, wordIdx) => clamp01((tIn - wordIdx * 90) / 220);
+
+function drawChyron(ctx, ch, W, H, s, tms, bodyFam) {
+  if (!ch || !ch.on || !ch.text) return;
+  const h = (ch.height ?? 26) * s;
+  const y = ch.position === 'bottom' ? H - h : 0;
+  ctx.save();
+  ctx.fillStyle = ch.bg || '#cc0a0a';
+  ctx.fillRect(0, y, W, h);
+  const fs = (ch.size ?? 11) * s;
+  ctx.font = `700 ${fs}px ${bodyFam}`;
+  ctx.textBaseline = 'middle';
+  const cy = y + h / 2;
+  let clipX = 0;
+  if (ch.label) {
+    const lw = ctx.measureText(ch.label).width + 18 * s;
+    ctx.fillStyle = ch.labelBg || '#ffffff';
+    ctx.fillRect(0, y, lw, h);
+    ctx.fillStyle = ch.labelColor || '#cc0a0a';
+    ctx.fillText(ch.label, 9 * s, cy);
+    clipX = lw;
+  }
+  const unit = ch.text + '   •   ';
+  const uw = ctx.measureText(unit).width;
+  if (uw > 0) {
+    ctx.beginPath(); ctx.rect(clipX, y, W - clipX, h); ctx.clip();
+    ctx.fillStyle = ch.color || '#ffffff';
+    const off = ((tms / 1000) * (ch.speed ?? 60) * s) % uw;
+    for (let x = clipX - off; x < W; x += uw) ctx.fillText(unit, x, cy);
+  }
+  ctx.restore();
+  ctx.textBaseline = 'alphabetic';
+}
+
+// Corner anchor → {x,y} top-left of a box w×h, shifted clear of the chyron bar.
+function cornerXY(pos, W, H, w, h, s, chyron) {
+  const pad = 12 * s;
+  const chH = (chyron && chyron.on) ? (chyron.height ?? 26) * s : 0;
+  const topShift = (chyron && chyron.on && chyron.position !== 'bottom') ? chH : 0;
+  const botShift = (chyron && chyron.on && chyron.position === 'bottom') ? chH : 0;
+  const x = (pos === 'tr' || pos === 'br') ? W - w - pad : pad;
+  const y = (pos === 'bl' || pos === 'br') ? H - h - pad - botShift : pad + topShift;
+  return { x, y };
+}
+
+function drawBrand(ctx, br, W, H, s, chyron, bodyFam, logoEl) {
+  if (!br || !br.on) return;
+  ctx.save();
+  ctx.globalAlpha = br.opacity ?? 0.8;
+  const fs = (br.size ?? 12) * s;
+  ctx.font = `600 ${fs}px ${bodyFam}`;
+  const logoH = logoEl ? fs * 1.7 : 0;
+  const logoW = logoEl ? logoH * ((logoEl.naturalWidth || 1) / (logoEl.naturalHeight || 1)) : 0;
+  const gap = logoEl && br.text ? 6 * s : 0;
+  const tw = br.text ? ctx.measureText(br.text).width : 0;
+  const totW = logoW + gap + tw;
+  const totH = Math.max(logoH, fs * 1.3);
+  const { x, y } = cornerXY(br.position || 'tl', W, H, totW, totH, s, chyron);
+  if (logoEl) { try { ctx.drawImage(logoEl, x, y, logoW, logoH); } catch { /* not loaded */ } }
+  if (br.text) {
+    ctx.fillStyle = br.color || '#ffffff';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(br.text, x + logoW + gap, y + totH / 2);
+    ctx.textBaseline = 'alphabetic';
+  }
+  ctx.restore();
+}
+
+function drawEpisode(ctx, ep, W, H, s, chyron, bodyFam) {
+  if (!ep || !ep.on || !ep.text) return;
+  ctx.save();
+  const fs = (ep.size ?? 11) * s;
+  ctx.font = `700 ${fs}px ${bodyFam}`;
+  const tw = ctx.measureText(ep.text).width;
+  const w = tw + 16 * s, h = fs * 1.9;
+  const { x, y } = cornerXY(ep.position || 'tr', W, H, w, h, s, chyron);
+  ctx.fillStyle = ep.bg || '#ff3b3b';
+  roundRect(ctx, x, y, w, h, 5 * s); ctx.fill();
+  ctx.fillStyle = ep.color || '#ffffff';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(ep.text, x + 8 * s, y + h / 2);
+  ctx.textBaseline = 'alphabetic';
+  ctx.restore();
+}
+
+// True when the lat/lng point faces the camera (not behind the globe horizon).
+function pointFacesCamera(gInst, lat, lng) {
+  try {
+    const p = gInst.getCoords(lat, lng, 0);
+    const cam = gInst.camera().position;
+    const pm = Math.hypot(p.x, p.y, p.z), cm = Math.hypot(cam.x, cam.y, cam.z);
+    if (!pm || !cm) return false;
+    return (p.x * cam.x + p.y * cam.y + p.z * cam.z) / (pm * cm) > 0.18;
+  } catch { return false; }
+}
+
+// Flag + country name pill anchored to the news point (conflictly-style).
+// scale converts globe-canvas px → composite-canvas px.
+function drawCountryLabel(ctx, gInst, item, cl, s, scale, bodyFam) {
+  if (!cl || !cl.on || !hasGeo(item) || !item.nation) return;
+  if (!pointFacesCamera(gInst, item.lat, item.lng)) return;
+  let sc;
+  try { sc = gInst.getScreenCoords(item.lat, item.lng, 0.01); } catch { return; }
+  if (!sc || !Number.isFinite(sc.x)) return;
+  const x = sc.x * scale, y = sc.y * scale;
+  const fs = (cl.size ?? 11) * s;
+  const flag = cl.flag !== false ? flagFor(item.nation) : '';
+  const label = (flag ? flag + ' ' : '') + item.nation;
+  ctx.save();
+  ctx.font = `700 ${fs}px ${bodyFam}`;
+  const tw = ctx.measureText(label).width;
+  const w = tw + 14 * s, h = fs * 1.9;
+  const bx = x - w / 2, by = y + 12 * s;
+  ctx.fillStyle = `rgba(7,11,20,${cl.bgOpacity ?? 0.7})`;
+  roundRect(ctx, bx, by, w, h, h / 2); ctx.fill();
+  ctx.fillStyle = cl.color || '#ffffff';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(label, bx + 7 * s, by + h / 2);
+  ctx.textBaseline = 'alphabetic';
+  ctx.restore();
 }
 
 // ---------- Canvas text wrap ----------
@@ -455,16 +654,17 @@ function buildStoryboard(clips, st, cardTransMs) {
   };
   const cardAt = (tms) => {
     const s = segAt(tms);
-    let alpha = 1;
+    let alpha = 1, tIn = tms;
     if (s.kind === 'intro') alpha = 0; // card hidden during the intro, reveals on clip 0
     if (s.kind === 'clip' && s.animate) {
       const local = tms - s.t0 - (s.revealDelay || 0);
+      tIn = local;
       alpha = clamp01(local / Math.max(1, cardTransMs));
       alpha = 1 - Math.pow(1 - alpha, 3);
     }
     const fadeBlack = (s.kind === 'outro' && st.outroType === 'fade')
       ? Math.pow(Math.min(1, (tms - s.t0) / Math.max(1, st.outroMs)), 2) : 0;
-    return { clip: s.clip, alpha, fadeBlack };
+    return { clip: s.clip, alpha, fadeBlack, tIn };
   };
   return { total, reelEnd, povAt, cardAt };
 }
@@ -490,14 +690,20 @@ function App() {
       const s = localStorage.getItem('georeel-theme-v2');
       if (s) {
         const p = JSON.parse(s);
-        return { ...DEFAULT_THEME, ...p, route: { ...DEFAULT_THEME.route, ...(p.route || {}) }, card: { ...DEFAULT_THEME.card, ...(p.card || {}), fields: { ...DEFAULT_THEME.card.fields, ...((p.card || {}).fields || {}) } } };
+        return { ...DEFAULT_THEME, ...p,
+          route: { ...DEFAULT_THEME.route, ...(p.route || {}) },
+          chyron: { ...DEFAULT_THEME.chyron, ...(p.chyron || {}) },
+          brand: { ...DEFAULT_THEME.brand, ...(p.brand || {}) },
+          episode: { ...DEFAULT_THEME.episode, ...(p.episode || {}) },
+          countryLabel: { ...DEFAULT_THEME.countryLabel, ...(p.countryLabel || {}) },
+          card: { ...DEFAULT_THEME.card, ...(p.card || {}), fields: { ...DEFAULT_THEME.card.fields, ...((p.card || {}).fields || {}) } } };
       }
     } catch { /* ignore */ }
     return DEFAULT_THEME;
   });
 
   const [settings, setSettings] = useState(() => {
-    const defaults = { holdMs: 3000, flyMs: 1200, altitude: 0.9, startLat: 20, startLng: 10, startAlt: 2.4, introMs: 800, introType: 'classic', outroType: 'hold', outroMs: 1500, autoSpin: true, driftIntensity: 0, showClouds: false, cloudPreset: 'medium', cloudOpacity: 0.28, cloudSpeed: 0.5, cloudOffsetLng: 0, cloudTilt: 0, exportTier: 'fast' };
+    const defaults = { holdMs: 3000, flyMs: 1200, altitude: 0.9, startLat: 20, startLng: 10, startAlt: 2.4, introMs: 800, introType: 'classic', outroType: 'hold', outroMs: 1500, autoSpin: true, driftIntensity: 0, showClouds: false, cloudPreset: 'medium', cloudOpacity: 0.28, cloudSpeed: 0.5, cloudOffsetLng: 0, cloudTilt: 0, exportTier: 'fast', showSafeZone: false };
     try { const s = localStorage.getItem('georeel-settings-v1'); if (s) return { ...defaults, ...JSON.parse(s) }; } catch { /* ignore */ }
     return defaults;
   });
@@ -517,6 +723,8 @@ function App() {
   const [importError, setImportError] = useState('');
   // Media overlay: blob URLs keyed by clip id (not persisted to localStorage)
   const [mediaUrls, setMediaUrls] = useState({});
+  // Brand logo (session-only blob, like clip media)
+  const [brandLogoUrl, setBrandLogoUrl] = useState(null);
 
   const globeEl = useRef(null);
   const globeInstance = useRef(null);
@@ -527,6 +735,8 @@ function App() {
   const pulseRef = useRef(1);
   const cardTransRef = useRef({ active: false, start: 0, dur: 350, type: 'slide' });
   const mediaElsRef = useRef({}); // { [clipId]: HTMLVideoElement | HTMLImageElement }
+  const brandLogoElRef = useRef(null); // loaded Image element for canvas export
+  const countryLabelElRef = useRef(null); // preview DOM node, positioned by RAF
   const outroRef = useRef({ active: false, start: 0, dur: 0, type: 'none' });
 
   const pickingRef = useRef(false);
@@ -553,6 +763,18 @@ function App() {
   const setCard = (patch) => setTheme(t => ({ ...t, card: { ...t.card, ...patch } }));
   const setField = (k, v) => setTheme(t => ({ ...t, card: { ...t.card, fields: { ...t.card.fields, [k]: v } } }));
   const setRoute = (patch) => setTheme(t => ({ ...t, route: { ...t.route, ...patch } }));
+  const setChyron = (patch) => setTheme(t => ({ ...t, chyron: { ...t.chyron, ...patch } }));
+  const setBrand = (patch) => setTheme(t => ({ ...t, brand: { ...t.brand, ...patch } }));
+  const setEpisode = (patch) => setTheme(t => ({ ...t, episode: { ...t.episode, ...patch } }));
+  const setCountryLabel = (patch) => setTheme(t => ({ ...t, countryLabel: { ...t.countryLabel, ...patch } }));
+  const handleLogoUpload = (file) => {
+    if (!file) return;
+    const url = URL.createObjectURL(file);
+    setBrandLogoUrl(url);
+    const img = new Image();
+    img.onload = () => { brandLogoElRef.current = img; };
+    img.src = url;
+  };
   const applyVibe = (key) => {
     const v = VIBES[key];
     setTheme(t => ({ ...t, texture: v.texture, accent: v.accent, gridColor: v.grid, borderColor: v.accent, card: { ...t.card, accentColor: v.accent } }));
@@ -702,6 +924,19 @@ function App() {
         if (globeInstance.current && th.heatmap && th.heatmap.some(h => h.conflict)) {
           pulseRef.current = pulseAt(ms);
           applyPolyColors(globeInstance.current, th, pulseRef.current);
+        }
+        // Country label (flag + name): follow the active point on screen
+        const lblEl = countryLabelElRef.current;
+        if (lblEl) {
+          const cl = th.countryLabel, item = currentNewsRef.current, gI = globeInstance.current;
+          if (cl?.on && gI && hasGeo(item) && item.nation && pointFacesCamera(gI, item.lat, item.lng)) {
+            try {
+              const sc = gI.getScreenCoords(item.lat, item.lng, 0.01);
+              lblEl.style.display = 'flex';
+              lblEl.style.left = sc.x + 'px';
+              lblEl.style.top = (sc.y + 12) + 'px';
+            } catch { lblEl.style.display = 'none'; }
+          } else lblEl.style.display = 'none';
         }
       }
       cloudRafId = requestAnimationFrame(rotateCloud);
@@ -1009,7 +1244,7 @@ function App() {
   };
 
   // ---------- Draw card on 2D canvas (matches DOM, for export) ----------
-  const drawCard = (ctx, s, item, alpha = 1, offsetY = 0) => {
+  const drawCard = (ctx, s, item, alpha = 1, offsetY = 0, tIn = Infinity) => {
     if (!item || !themeRef.current.showCards || alpha <= 0) return;
     ctx.save();
     if (alpha < 1) ctx.globalAlpha = alpha;
@@ -1026,7 +1261,7 @@ function App() {
     ctx.textBaseline = 'alphabetic';
     ctx.letterSpacing = titleLS + 'px';
     ctx.font = `700 ${c.titleSize * s}px ${FONT_FAMILY[c.titleFont]}`;
-    const titleLines = wrapLines(ctx, titleText, innerW, 3);
+    const titleLines = layoutTitle(ctx, tokenizeTitle(titleText), innerW, 3);
     ctx.letterSpacing = '0px';
     ctx.font = `${c.textSize * s}px ${bodyFam}`;
     const bodyLines = f.body ? wrapLines(ctx, item.text, innerW, 4) : [];
@@ -1100,12 +1335,33 @@ function App() {
       y += 22 * s;
     }
 
-    // title
-    ctx.fillStyle = c.titleColor;
+    // title — word-by-word: **word** highlight + kinetic reveal ('words' transition)
     ctx.letterSpacing = titleLS + 'px';
     ctx.font = `700 ${c.titleSize * s}px ${FONT_FAMILY[c.titleFont]}`;
+    const hlColor = c.highlightColor || c.accentColor || themeRef.current.accent;
+    const kinetic = c.transitionType === 'words' && Number.isFinite(tIn);
+    const prevAlign = ctx.textAlign;
+    ctx.textAlign = 'left';
     y += c.titleSize * s;
-    for (const ln of titleLines) { ctx.fillText(ln, tx, y); y += titleLH; }
+    let wordIdx = 0;
+    for (const ln of titleLines) {
+      const lastW = ln.length ? ln[ln.length - 1] : null;
+      const lineW = lastW ? lastW.x + ctx.measureText(lastW.t).width : 0;
+      const lineX = c.align === 'center' ? centerX - lineW / 2 : leftX;
+      for (const w of ln) {
+        const wa = kinetic ? kineticAlpha(tIn, wordIdx) : 1;
+        if (wa > 0) {
+          ctx.save();
+          ctx.globalAlpha *= wa;
+          ctx.fillStyle = w.hl ? hlColor : c.titleColor;
+          ctx.fillText(w.t, lineX + w.x, y + (kinetic ? (1 - wa) * 5 * s : 0));
+          ctx.restore();
+        }
+        wordIdx++;
+      }
+      y += titleLH;
+    }
+    ctx.textAlign = prevAlign;
     ctx.letterSpacing = '0px';
 
     // body
@@ -1145,10 +1401,18 @@ function App() {
     const W = g.width, H = g.height, s = W / 360;
     const comp = document.createElement('canvas'); comp.width = W; comp.height = H;
     const ctx = comp.getContext('2d');
-    ctx.filter = planetFilter(themeRef.current);
+    const th = themeRef.current;
+    const overlayFam = FONT_FAMILY[th.card.bodyFont] || FONT_FAMILY.Inter;
+    ctx.filter = planetFilter(th);
     ctx.drawImage(g, 0, 0, W, H);
     ctx.filter = 'none';
+    const gI = globeInstance.current;
+    // Canvas pixel size may exceed CSS size (devicePixelRatio): scale screen coords
+    if (gI) drawCountryLabel(ctx, gI, currentNewsRef.current, th.countryLabel, s, W / 360, overlayFam);
     drawCard(ctx, s, currentNewsRef.current);
+    drawChyron(ctx, th.chyron, W, H, s, 0, overlayFam);
+    drawBrand(ctx, th.brand, W, H, s, th.chyron, overlayFam, brandLogoElRef.current);
+    drawEpisode(ctx, th.episode, W, H, s, th.chyron, overlayFam);
     const a = document.createElement('a');
     a.download = `GeoReel_${fileStamp()}.png`;
     a.href = comp.toDataURL('image/png');
@@ -1279,10 +1543,13 @@ function App() {
       const planetFx = planetFilter(th);
       let pendingEncode = null;
 
+      const overlayFam = FONT_FAMILY[th.card.bodyFont] || FONT_FAMILY.Inter;
+      const globeScale = W / gW; // globe canvas px → composite px (country label)
+
       for (let f = 0; f < totalFrames; f++) {
         const tms = (f / fps) * 1000;
         const pov = sb.povAt(tms);
-        const { clip, alpha, fadeBlack } = sb.cardAt(tms);
+        const { clip, alpha, fadeBlack, tIn } = sb.cardAt(tms);
         const item = clips[clip] || null;
         currentNewsRef.current = item;
 
@@ -1309,20 +1576,26 @@ function App() {
         ctx.filter = planetFx; // grayscale/cinematic grading on the globe only
         ctx.drawImage(g, 0, 0, W, H); // smooth upscale from 720p to export res
         ctx.filter = 'none';
+        // Country label (flag + name) — drawn over the globe, under the card
+        drawCountryLabel(ctx, gInst, item, th.countryLabel, s, globeScale, overlayFam);
         const offsetY = transType === 'slide' ? (1 - alpha) * 28 * s : 0;
         const drawAlpha = transType === 'none' ? 1 : alpha;
         const scale = transType === 'zoom' ? 0.92 + 0.08 * alpha : 1;
         if (scale !== 1) {
           ctx.save();
           ctx.translate(W / 2, H / 2); ctx.scale(scale, scale); ctx.translate(-W / 2, -H / 2);
-          drawCard(ctx, s, item, drawAlpha, offsetY);
+          drawCard(ctx, s, item, drawAlpha, offsetY, tIn);
           ctx.restore();
         } else {
-          drawCard(ctx, s, item, drawAlpha, offsetY);
+          drawCard(ctx, s, item, drawAlpha, offsetY, tIn);
         }
         // Media overlay
         const mEntry = exportMediaMap[clip];
         if (mEntry && alpha > 0) drawMediaOnCanvas(ctx, mEntry.el, mEntry.cm, W, H, s, th.accent);
+        // v2.0 fixed overlays: chyron ticker + watermark + episode badge
+        drawChyron(ctx, th.chyron, W, H, s, tms, overlayFam);
+        drawBrand(ctx, th.brand, W, H, s, th.chyron, overlayFam, brandLogoElRef.current);
+        drawEpisode(ctx, th.episode, W, H, s, th.chyron, overlayFam);
 
         if (fadeBlack > 0) { ctx.fillStyle = `rgba(0,0,0,${fadeBlack})`; ctx.fillRect(0, 0, W, H); }
 
@@ -1373,20 +1646,32 @@ function App() {
     const comp = document.createElement('canvas'); comp.width = W; comp.height = H;
     const ctx = comp.getContext('2d');
     let raf;
+    const capT0 = nowMs();
     const loop = () => {
+      const th = themeRef.current;
+      const overlayFam = FONT_FAMILY[th.card.bodyFont] || FONT_FAMILY.Inter;
       ctx.clearRect(0, 0, W, H);
+      ctx.filter = planetFilter(th);
       ctx.drawImage(g, 0, 0, W, H);
+      ctx.filter = 'none';
+      const gI = globeInstance.current;
+      // getScreenCoords returns CSS px (360-wide); canvas includes devicePixelRatio → scale by s
+      if (gI) drawCountryLabel(ctx, gI, currentNewsRef.current, th.countryLabel, s, s, overlayFam);
       // Card transition
       let cardAlpha = 1, cardOffsetY = 0;
       const trans = cardTransRef.current;
+      const tIn = nowMs() - trans.start;
       if (trans.active) {
-        const t = Math.min(1, (nowMs() - trans.start) / Math.max(1, trans.dur));
+        const t = Math.min(1, tIn / Math.max(1, trans.dur));
         const eased = 1 - Math.pow(1 - t, 3); // ease-out-cubic
         cardAlpha = eased;
         if (trans.type === 'slide') cardOffsetY = (1 - eased) * 28 * s;
         if (t >= 1) trans.active = false;
       }
-      drawCard(ctx, s, currentNewsRef.current, cardAlpha, cardOffsetY);
+      drawCard(ctx, s, currentNewsRef.current, cardAlpha, cardOffsetY, tIn);
+      drawChyron(ctx, th.chyron, W, H, s, nowMs() - capT0, overlayFam);
+      drawBrand(ctx, th.brand, W, H, s, th.chyron, overlayFam, brandLogoElRef.current);
+      drawEpisode(ctx, th.episode, W, H, s, th.chyron, overlayFam);
       // Outro overlay
       const outro = outroRef.current;
       if (outro.active && outro.type === 'fade') {
@@ -1449,7 +1734,7 @@ function App() {
           <div className="flex items-center gap-3">
             <div className="w-8 h-8 rounded-xl flex items-center justify-center" style={{ background: accent }}><GlobeIcon className="w-5 h-5 text-black/80" /></div>
             <div className="font-semibold text-xl tracking-tight">GeoReel</div>
-            <div className="px-2 py-0.5 text-[10px] rounded-md bg-slate-800 font-mono" style={{ color: accent }}>STUDIO</div>
+            <div className="px-2 py-0.5 text-[10px] rounded-md bg-slate-800 font-mono" style={{ color: accent }}>STUDIO 2.0</div>
           </div>
           <button onClick={loadSampleData} className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs"><RotateCcw className="w-3.5 h-3.5" /> Esempi</button>
         </div>
@@ -1513,7 +1798,7 @@ function App() {
             {theme.showCards && currentNews && !introActive && (
               <div className="card-slot" style={slotStyle}>
                 <motion.div key={`${currentNews.id}-${cardSeq}`}
-                initial={card.transitionType === 'none' ? { opacity: 1, y: 0, scale: 1 } : card.transitionType === 'fade' ? { opacity: 0, y: 0, scale: 1 } : card.transitionType === 'zoom' ? { opacity: 0, scale: 0.92, y: 0 } : { opacity: 0, y: 22, scale: 1 }}
+                initial={card.transitionType === 'none' ? { opacity: 1, y: 0, scale: 1 } : (card.transitionType === 'fade' || card.transitionType === 'words') ? { opacity: 0, y: 0, scale: 1 } : card.transitionType === 'zoom' ? { opacity: 0, scale: 0.92, y: 0 } : { opacity: 0, y: 22, scale: 1 }}
                 animate={{ opacity: 1, y: 0, scale: 1 }}
                 transition={{ duration: (card.transitionMs || 350) / 1000, ease: [0.23, 1, 0.32, 1], delay: (isPlaying && hasGeo(currentNews)) ? Math.min(settings.flyMs * 0.45, (currentNews.duration || settings.holdMs) * 0.5) / 1000 : 0 }}
                   className="news-card" style={{
@@ -1529,7 +1814,15 @@ function App() {
                       {card.fields.date && <span className="text-[10px] font-mono" style={{ color: card.metaColor }}>{currentNews.date}</span>}
                     </div>
                   )}
-                  <h3 style={{ color: card.titleColor, fontFamily: FONT_FAMILY[card.titleFont], fontSize: card.titleSize, fontWeight: 700, textTransform: card.titleUpper ? 'uppercase' : 'none', letterSpacing: card.titleSpacing ? `${card.titleSpacing}px` : 'normal' }}>{currentNews.title}</h3>
+                  <h3 style={{ color: card.titleColor, fontFamily: FONT_FAMILY[card.titleFont], fontSize: card.titleSize, fontWeight: 700, textTransform: card.titleUpper ? 'uppercase' : 'none', letterSpacing: card.titleSpacing ? `${card.titleSpacing}px` : 'normal' }}>
+                    <TitleWords
+                      key={`${currentNews.id}-${cardSeq}`}
+                      text={currentNews.title}
+                      hlColor={card.highlightColor || card.accentColor || accent}
+                      kinetic={card.transitionType === 'words'}
+                      baseDelay={(isPlaying && hasGeo(currentNews)) ? Math.min(settings.flyMs * 0.45, (currentNews.duration || settings.holdMs) * 0.5) / 1000 : 0}
+                    />
+                  </h3>
                   {(currentNews.type === 'info' || card.fields.body) && <p style={{ color: card.textColor, fontSize: card.textSize, fontFamily: FONT_FAMILY[card.bodyFont] || FONT_FAMILY.Inter }} className="line-clamp-4">{currentNews.text}</p>}
                   {currentNews.type !== 'info' && (card.fields.nation || card.fields.source) && (
                     <div className="flex items-center justify-between text-[10px] pt-2.5 border-t border-white/10" style={{ fontFamily: FONT_FAMILY[card.bodyFont] || FONT_FAMILY.Inter }}>
@@ -1569,6 +1862,37 @@ function App() {
                 </div>
               );
             })}
+            {/* Country label (flag + name) — positioned each frame by the RAF loop */}
+            <div ref={countryLabelElRef} style={{ display: 'none', position: 'absolute', transform: 'translateX(-50%)', zIndex: 44, pointerEvents: 'none', alignItems: 'center', gap: 4, padding: '3px 7px', borderRadius: 999, background: `rgba(7,11,20,${theme.countryLabel?.bgOpacity ?? 0.7})`, color: theme.countryLabel?.color || '#fff', fontSize: theme.countryLabel?.size ?? 11, fontWeight: 700, fontFamily: FONT_FAMILY[card.bodyFont] || FONT_FAMILY.Inter, whiteSpace: 'nowrap' }}>
+              {(theme.countryLabel?.flag !== false ? flagFor(currentNews?.nation) + ' ' : '') + (currentNews?.nation || '')}
+            </div>
+            {/* Breaking-news chyron */}
+            {theme.chyron?.on && theme.chyron.text && (
+              <Chyron ch={theme.chyron} fontFamily={FONT_FAMILY[card.bodyFont] || FONT_FAMILY.Inter} />
+            )}
+            {/* Watermark / branding */}
+            {theme.brand?.on && (
+              <div style={{ position: 'absolute', zIndex: 48, pointerEvents: 'none', display: 'flex', alignItems: 'center', gap: 6, opacity: theme.brand.opacity ?? 0.8, ...overlayCorner(theme.brand.position || 'tl', theme.chyron) }}>
+                {brandLogoUrl && <img src={brandLogoUrl} alt="" style={{ height: (theme.brand.size ?? 12) * 1.7 }} />}
+                {theme.brand.text && <span style={{ color: theme.brand.color || '#fff', fontSize: theme.brand.size ?? 12, fontWeight: 600, fontFamily: FONT_FAMILY[card.bodyFont] || FONT_FAMILY.Inter }}>{theme.brand.text}</span>}
+              </div>
+            )}
+            {/* Episode badge */}
+            {theme.episode?.on && theme.episode.text && (
+              <div style={{ position: 'absolute', zIndex: 48, pointerEvents: 'none', padding: '3px 8px', borderRadius: 5, background: theme.episode.bg || '#ff3b3b', color: theme.episode.color || '#fff', fontSize: theme.episode.size ?? 11, fontWeight: 700, fontFamily: FONT_FAMILY[card.bodyFont] || FONT_FAMILY.Inter, ...overlayCorner(theme.episode.position || 'tr', theme.chyron) }}>
+                {theme.episode.text}
+              </div>
+            )}
+            {/* TikTok safe-zone guide (editor aid, never exported) */}
+            {settings.showSafeZone && (
+              <div className="absolute inset-0 z-[60] pointer-events-none">
+                <div className="absolute left-0 right-0 top-0" style={{ height: 60, background: 'rgba(255,80,80,0.12)', borderBottom: '1px dashed rgba(255,120,120,0.5)' }} />
+                <div className="absolute left-0 right-0 bottom-0" style={{ height: 120, background: 'rgba(255,80,80,0.12)', borderTop: '1px dashed rgba(255,120,120,0.5)' }} />
+                <div className="absolute top-0 bottom-0 right-0" style={{ width: 56, background: 'rgba(255,80,80,0.12)', borderLeft: '1px dashed rgba(255,120,120,0.5)' }} />
+                <div className="absolute bottom-[124px] left-2 text-[8px] text-red-300/80 font-mono">caption/UI TikTok</div>
+                <div className="absolute top-[64px] right-1 text-[8px] text-red-300/80 font-mono rotate-90 origin-top-right">icone</div>
+              </div>
+            )}
           </div>
           </div>
           <Timeline news={news} currentIndex={currentIndex} settings={settings} accent={accent}
@@ -1579,7 +1903,7 @@ function App() {
         {/* RIGHT — tabbed controls */}
         <div className="w-80 border-l border-slate-800/80 bg-slate-950 flex flex-col">
           <div className="flex border-b border-slate-800/80">
-            {[['preview', 'Anteprima', Play], ['planet', 'Pianeta', GlobeIcon], ['card', 'Card', Layers]].map(([k, label, Icon]) => (
+            {[['preview', 'Anteprima', Play], ['planet', 'Pianeta', GlobeIcon], ['card', 'Card', Layers], ['overlay', 'Overlay', Sparkles]].map(([k, label, Icon]) => (
               <button key={k} onClick={() => setTab(k)} className={`flex-1 flex items-center justify-center gap-1.5 py-3 text-xs font-medium border-b-2 transition-colors ${tab === k ? 'text-white' : 'border-transparent text-slate-500 hover:text-slate-300'}`} style={tab === k ? { borderColor: accent, color: accent } : {}}>
                 <Icon className="w-3.5 h-3.5" /> {label}
               </button>
@@ -1807,7 +2131,8 @@ function App() {
                 <div className="bg-slate-900 rounded-2xl p-4 space-y-3">
                   <div>
                     <div className="text-[10px] text-slate-500 mb-1">Animazione entrata</div>
-                    <Seg value={card.transitionType} onChange={(v) => setCard({ transitionType: v })} options={[{ v: 'none', label: 'Istantanea' }, { v: 'fade', label: 'Fade' }, { v: 'slide', label: 'Slide' }, { v: 'zoom', label: 'Zoom' }]} />
+                    <Seg value={card.transitionType} onChange={(v) => setCard({ transitionType: v })} options={[{ v: 'none', label: 'Istant.' }, { v: 'fade', label: 'Fade' }, { v: 'slide', label: 'Slide' }, { v: 'zoom', label: 'Zoom' }, { v: 'words', label: 'Parole' }]} />
+                    {card.transitionType === 'words' && <div className="text-[9px] text-slate-600 mt-1">Le parole del titolo entrano una alla volta (stile anchorman)</div>}
                   </div>
                   {card.transitionType !== 'none' && <Slider label="Durata animazione" value={card.transitionMs} min={100} max={900} step={50} display={`${card.transitionMs}ms`} onChange={(v) => setCard({ transitionMs: v })} />}
                 </div>
@@ -1859,6 +2184,11 @@ function App() {
                   <ColorRow label="Colore meta (data/nazione/fonte)" value={card.metaColor || '#94a3b8'} onChange={(v) => setCard({ metaColor: v })} />
                   <ColorRow label="Colore sfondo" value={card.bgColor} onChange={(v) => setCard({ bgColor: v })} />
                   <ColorRow label="Colore bordo accento" value={card.accentColor} onChange={(v) => setCard({ accentColor: v })} />
+                  <div className="flex items-center gap-2">
+                    <ColorRow label="Colore evidenziazione **parola**" value={card.highlightColor || card.accentColor} onChange={(v) => setCard({ highlightColor: v })} />
+                    {card.highlightColor && <button onClick={() => setCard({ highlightColor: null })} className="text-[9px] px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 flex-shrink-0">Auto</button>}
+                  </div>
+                  <div className="text-[9px] text-slate-600 leading-snug">Scrivi <span className="font-mono text-slate-400">**parola**</span> nel titolo per colorarla (es: Trump **rinvia** gli attacchi)</div>
                 </div>
                 <div>
                   <div className="text-[11px] text-slate-400 mb-2">Campi visibili</div>
@@ -1867,6 +2197,89 @@ function App() {
                       <Toggle key={k} active={card.fields[k]} onClick={() => setField(k, !card.fields[k])} label={label} accent={accent} />
                     ))}
                   </div>
+                </div>
+              </>
+            )}
+
+            {tab === 'overlay' && (
+              <>
+                {/* Chyron */}
+                <div className="bg-slate-900 rounded-2xl p-4 space-y-3">
+                  <Toggle wide active={theme.chyron?.on} onClick={() => setChyron({ on: !theme.chyron?.on })} icon={<Megaphone className="w-3.5 h-3.5" />} label="Chyron breaking news" accent={accent} />
+                  {theme.chyron?.on && <>
+                    <Field label="Testo scorrevole"><input type="text" value={theme.chyron.text} onChange={(e) => setChyron({ text: e.target.value })} className="inp text-xs" /></Field>
+                    <Field label="Etichetta fissa (vuoto = nessuna)"><input type="text" value={theme.chyron.label} onChange={(e) => setChyron({ label: e.target.value })} placeholder="BREAKING" className="inp text-xs" /></Field>
+                    <div>
+                      <div className="text-[10px] text-slate-500 mb-1.5">Posizione</div>
+                      <Seg value={theme.chyron.position || 'top'} onChange={(v) => setChyron({ position: v })} options={[{ v: 'top', label: 'Alto' }, { v: 'bottom', label: 'Basso' }]} />
+                    </div>
+                    <Slider label="Velocità scorrimento" value={theme.chyron.speed ?? 60} min={20} max={200} step={10} display={`${theme.chyron.speed ?? 60}px/s`} onChange={(v) => setChyron({ speed: v })} />
+                    <Slider label="Altezza barra" value={theme.chyron.height ?? 26} min={18} max={44} step={2} display={`${theme.chyron.height ?? 26}px`} onChange={(v) => setChyron({ height: v })} />
+                    <Slider label="Dimensione testo" value={theme.chyron.size ?? 11} min={8} max={16} step={1} display={`${theme.chyron.size ?? 11}px`} onChange={(v) => setChyron({ size: v })} />
+                    <ColorRow label="Sfondo barra" value={theme.chyron.bg} onChange={(v) => setChyron({ bg: v })} />
+                    <ColorRow label="Colore testo" value={theme.chyron.color} onChange={(v) => setChyron({ color: v })} />
+                    <ColorRow label="Sfondo etichetta" value={theme.chyron.labelBg} onChange={(v) => setChyron({ labelBg: v })} />
+                    <ColorRow label="Colore etichetta" value={theme.chyron.labelColor} onChange={(v) => setChyron({ labelColor: v })} />
+                  </>}
+                </div>
+
+                {/* Country label */}
+                <div className="bg-slate-900 rounded-2xl p-4 space-y-3">
+                  <Toggle wide active={theme.countryLabel?.on} onClick={() => setCountryLabel({ on: !theme.countryLabel?.on })} icon={<Flag className="w-3.5 h-3.5" />} label="Etichetta paese (bandiera + nome)" accent={accent} />
+                  {theme.countryLabel?.on && <>
+                    <Toggle wide active={theme.countryLabel.flag !== false} onClick={() => setCountryLabel({ flag: !(theme.countryLabel.flag !== false) })} icon={<Flag className="w-3.5 h-3.5" />} label={theme.countryLabel.flag !== false ? 'Bandiera: ON' : 'Bandiera: OFF'} accent={accent} />
+                    <Slider label="Dimensione" value={theme.countryLabel.size ?? 11} min={8} max={18} step={1} display={`${theme.countryLabel.size ?? 11}px`} onChange={(v) => setCountryLabel({ size: v })} />
+                    <Slider label="Opacità sfondo" value={Math.round((theme.countryLabel.bgOpacity ?? 0.7) * 100)} min={0} max={100} step={5} display={`${Math.round((theme.countryLabel.bgOpacity ?? 0.7) * 100)}%`} onChange={(v) => setCountryLabel({ bgOpacity: v / 100 })} />
+                    <ColorRow label="Colore testo" value={theme.countryLabel.color} onChange={(v) => setCountryLabel({ color: v })} />
+                    <div className="text-[9px] text-slate-600">Segue il punto della notizia sul globo, sparisce dietro l'orizzonte. La bandiera deriva dal campo Paese della clip.</div>
+                  </>}
+                </div>
+
+                {/* Watermark / brand */}
+                <div className="bg-slate-900 rounded-2xl p-4 space-y-3">
+                  <Toggle wide active={theme.brand?.on} onClick={() => setBrand({ on: !theme.brand?.on })} icon={<ImageIcon className="w-3.5 h-3.5" />} label="Watermark / branding" accent={accent} />
+                  {theme.brand?.on && <>
+                    <Field label="Testo (es. @tuocanale)"><input type="text" value={theme.brand.text} onChange={(e) => setBrand({ text: e.target.value })} className="inp text-xs" /></Field>
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] text-slate-400">Logo (questa sessione)</span>
+                      {brandLogoUrl ? (
+                        <button onClick={() => { setBrandLogoUrl(null); brandLogoElRef.current = null; }} className="text-[10px] text-red-400 hover:text-red-300 flex items-center gap-1"><X className="w-3 h-3" /> Rimuovi</button>
+                      ) : (
+                        <label className="cursor-pointer text-[10px] px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700" style={{ color: accent }}>
+                          Carica immagine
+                          <input type="file" accept="image/*" className="hidden" onChange={e => handleLogoUpload(e.target.files[0])} />
+                        </label>
+                      )}
+                    </div>
+                    <div>
+                      <div className="text-[10px] text-slate-500 mb-1.5">Angolo</div>
+                      <Seg value={theme.brand.position || 'tl'} onChange={(v) => setBrand({ position: v })} options={[{ v: 'tl', label: '↖' }, { v: 'tr', label: '↗' }, { v: 'bl', label: '↙' }, { v: 'br', label: '↘' }]} />
+                    </div>
+                    <Slider label="Dimensione" value={theme.brand.size ?? 12} min={8} max={22} step={1} display={`${theme.brand.size ?? 12}px`} onChange={(v) => setBrand({ size: v })} />
+                    <Slider label="Opacità" value={Math.round((theme.brand.opacity ?? 0.8) * 100)} min={10} max={100} step={5} display={`${Math.round((theme.brand.opacity ?? 0.8) * 100)}%`} onChange={(v) => setBrand({ opacity: v / 100 })} />
+                    <ColorRow label="Colore testo" value={theme.brand.color} onChange={(v) => setBrand({ color: v })} />
+                  </>}
+                </div>
+
+                {/* Episode badge */}
+                <div className="bg-slate-900 rounded-2xl p-4 space-y-3">
+                  <Toggle wide active={theme.episode?.on} onClick={() => setEpisode({ on: !theme.episode?.on })} icon={<Award className="w-3.5 h-3.5" />} label="Badge episodio / serie" accent={accent} />
+                  {theme.episode?.on && <>
+                    <Field label="Testo badge"><input type="text" value={theme.episode.text} onChange={(e) => setEpisode({ text: e.target.value })} placeholder="EP. 1" className="inp text-xs" /></Field>
+                    <div>
+                      <div className="text-[10px] text-slate-500 mb-1.5">Angolo</div>
+                      <Seg value={theme.episode.position || 'tr'} onChange={(v) => setEpisode({ position: v })} options={[{ v: 'tl', label: '↖' }, { v: 'tr', label: '↗' }, { v: 'bl', label: '↙' }, { v: 'br', label: '↘' }]} />
+                    </div>
+                    <Slider label="Dimensione" value={theme.episode.size ?? 11} min={8} max={18} step={1} display={`${theme.episode.size ?? 11}px`} onChange={(v) => setEpisode({ size: v })} />
+                    <ColorRow label="Sfondo badge" value={theme.episode.bg} onChange={(v) => setEpisode({ bg: v })} />
+                    <ColorRow label="Colore testo" value={theme.episode.color} onChange={(v) => setEpisode({ color: v })} />
+                  </>}
+                </div>
+
+                {/* Safe zone */}
+                <div className="bg-slate-900 rounded-2xl p-4 space-y-2">
+                  <Toggle wide active={settings.showSafeZone} onClick={() => setSettings(s => ({ ...s, showSafeZone: !s.showSafeZone }))} icon={<Smartphone className="w-3.5 h-3.5" />} label="Guide safe-zone TikTok" accent={accent} />
+                  <div className="text-[9px] text-slate-600 leading-snug">Mostra le aree coperte dall'interfaccia TikTok (caption in basso, icone a destra). Solo in anteprima — mai nel video esportato.</div>
                 </div>
               </>
             )}
@@ -2179,6 +2592,57 @@ function Timeline({ news, currentIndex, settings, accent, onSelect, onReorder, o
       </div>
     </div>
   );
+}
+
+// DOM corner placement matching cornerXY() on canvas (12px pad, clears the chyron)
+function overlayCorner(pos, chyron) {
+  const chH = chyron?.on ? (chyron.height ?? 26) : 0;
+  const top = 12 + (chyron?.on && chyron.position !== 'bottom' ? chH : 0);
+  const bottom = 12 + (chyron?.on && chyron.position === 'bottom' ? chH : 0);
+  if (pos === 'tl') return { top, left: 12 };
+  if (pos === 'tr') return { top, right: 12 };
+  if (pos === 'bl') return { bottom, left: 12 };
+  return { bottom, right: 12 };
+}
+
+// Scrolling breaking-news bar. Measures its content to keep the speed in px/s
+// consistent with the deterministic canvas version used in export.
+function Chyron({ ch, fontFamily }) {
+  const trackRef = useRef(null);
+  const [dur, setDur] = useState(10);
+  const unit = ch.text + '   •   ';
+  useEffect(() => {
+    if (trackRef.current) {
+      const half = trackRef.current.scrollWidth / 2;
+      if (half > 0) setDur(half / Math.max(1, ch.speed ?? 60));
+    }
+  }, [ch.text, ch.size, ch.speed]);
+  return (
+    <div style={{ position: 'absolute', left: 0, right: 0, zIndex: 47, height: ch.height ?? 26, background: ch.bg || '#cc0a0a', display: 'flex', alignItems: 'center', overflow: 'hidden', pointerEvents: 'none', ...(ch.position === 'bottom' ? { bottom: 0 } : { top: 0 }) }}>
+      {ch.label && (
+        <div style={{ flexShrink: 0, zIndex: 1, height: '100%', display: 'flex', alignItems: 'center', padding: '0 9px', background: ch.labelBg || '#fff', color: ch.labelColor || '#cc0a0a', fontSize: ch.size ?? 11, fontWeight: 700, fontFamily }}>
+          {ch.label}
+        </div>
+      )}
+      <div style={{ flex: 1, overflow: 'hidden', height: '100%', display: 'flex', alignItems: 'center' }}>
+        <div ref={trackRef} className="chyron-track" style={{ animationDuration: `${dur}s`, color: ch.color || '#fff', fontSize: ch.size ?? 11, fontWeight: 700, fontFamily }}>
+          <span>{unit.repeat(6)}</span><span>{unit.repeat(6)}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Title words with **keyword** highlight + optional kinetic word-by-word reveal.
+function TitleWords({ text, hlColor, kinetic, baseDelay }) {
+  const tokens = tokenizeTitle(text);
+  return tokens.map((w, i) => {
+    const word = w.t + (i < tokens.length - 1 ? ' ' : '');
+    const style = { color: w.hl ? hlColor : undefined, whiteSpace: 'pre-wrap', display: 'inline-block' };
+    return kinetic
+      ? <motion.span key={i} initial={{ opacity: 0, y: 5 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: baseDelay + i * 0.09, duration: 0.22 }} style={style}>{word}</motion.span>
+      : <span key={i} style={w.hl ? style : { whiteSpace: 'pre-wrap' }}>{word}</span>;
+  });
 }
 
 function Slider({ label, value, min, max, step, display, onChange }) {

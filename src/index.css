@@ -31,6 +31,18 @@ body {
   background: #000;
 }
 
+/* Breaking-news chyron marquee: track holds two identical halves, slides one half */
+@keyframes gr-marquee {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-50%); }
+}
+.chyron-track {
+  display: inline-flex;
+  white-space: nowrap;
+  will-change: transform;
+  animation: gr-marquee linear infinite;
+}
+
 /* Card slot centers the card; Framer animates only Y on the inner card
    (fixes the off-center bug where motion's transform overrode translateX) */
 .card-slot {
