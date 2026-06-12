@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
+import CartaVivaStudio from './CartaVivaStudio.jsx';
 import * as THREE from 'three';
 import Globe from 'globe.gl';
 import { feature } from 'topojson-client';
@@ -150,6 +151,7 @@ function roundRect(ctx, x, y, w, h, r) {
 }
 
 function App() {
+  const [appMode, setAppMode] = useState('globe'); // 'globe' | 'carta'
   const [news, setNews] = useState(() => {
     try { const s = localStorage.getItem('georeel-news'); return s ? JSON.parse(s) : SAMPLE_NEWS; }
     catch { return SAMPLE_NEWS; }
@@ -558,11 +560,22 @@ function App() {
             <div className="font-semibold text-xl tracking-tight">GeoReel</div>
             <div className="px-2 py-0.5 text-[10px] rounded-md bg-slate-800 font-mono" style={{ color: accent }}>STUDIO</div>
           </div>
-          <button onClick={loadSampleData} className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs"><RotateCcw className="w-3.5 h-3.5" /> Esempi</button>
+          {/* Mode switcher */}
+          <div className="flex items-center gap-1 bg-slate-900 rounded-xl p-1 border border-slate-800">
+            <button onClick={() => setAppMode('globe')} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${appMode === 'globe' ? 'bg-slate-700 text-white' : 'text-slate-500 hover:text-slate-300'}`}>
+              <GlobeIcon className="w-3.5 h-3.5" /> Globe Studio
+            </button>
+            <button onClick={() => setAppMode('carta')} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${appMode === 'carta' ? 'bg-slate-700 text-white' : 'text-slate-500 hover:text-slate-300'}`}>
+              <Route className="w-3.5 h-3.5" /> CartaViva
+            </button>
+          </div>
+          <button onClick={loadSampleData} className={`flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs ${appMode === 'carta' ? 'invisible' : ''}`}><RotateCcw className="w-3.5 h-3.5" /> Esempi</button>
         </div>
       </nav>
 
-      <div className="flex flex-1 overflow-hidden max-w-[1480px] mx-auto w-full">
+      {appMode === 'carta' && <CartaVivaStudio />}
+
+      <div className={`flex flex-1 overflow-hidden max-w-[1480px] mx-auto w-full ${appMode === 'carta' ? 'hidden' : ''}`}>
         {/* LEFT — news */}
         <div className="w-72 border-r border-slate-800/80 bg-slate-950 flex flex-col">
           <div className="p-5 flex-1 overflow-auto">
