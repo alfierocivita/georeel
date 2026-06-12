@@ -1805,13 +1805,14 @@ export default function CartaVivaStudio() {
                 <Section title="Azioni rapide">
                   <div className="space-y-1">
                     {[
-                      ['⚡ Aggiungi Breaking News', qaBreaking],
-                      ['💥 Crea Conflitto', qaConflict],
-                      ['🤝 Mostra Alleanze', qaAlliances],
-                      ['📜 Evoluzione Storica', qaHistory],
-                    ].map(([label, fn]) => (
+                      [Zap, 'Breaking News', qaBreaking],
+                      [Crosshair, 'Crea Conflitto', qaConflict],
+                      [Flag, 'Mostra Alleanze', qaAlliances],
+                      [BookMarked, 'Evoluzione Storica', qaHistory],
+                    ].map(([Icon, label, fn]) => (
                       <button key={label} onClick={fn}
-                        className="w-full px-2.5 py-1.5 rounded-lg text-[10.5px] text-left border border-white/[0.05] text-slate-400 hover:text-slate-100 hover:border-[var(--cva)]/40 hover:bg-[var(--cva)]/5 transition-all">
+                        className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[10.5px] text-left border border-white/[0.05] text-slate-400 hover:text-slate-100 hover:border-[var(--cva)]/40 hover:bg-[var(--cva)]/5 transition-all">
+                        <Icon className="w-3 h-3 shrink-0 opacity-50" />
                         {label}
                       </button>
                     ))}
@@ -1845,7 +1846,7 @@ export default function CartaVivaStudio() {
                           <button onClick={() => setCameraKFs(kfs => kfs.filter((_, j) => j !== i))} className="text-red-700 hover:text-red-400">✕</button>
                         </div>
                       ))}
-                      <button onClick={() => setCameraKFs([])} className="text-[9px] text-red-800 hover:text-red-500 px-1.5">cancella tutti</button>
+                      <button onClick={() => setCameraKFs([])} className="text-[9px] text-slate-600 hover:text-red-400 px-1.5 mt-0.5 transition-colors">↺ cancella tutti</button>
                     </div>
                   )}
                 </Section>
@@ -1918,15 +1919,15 @@ export default function CartaVivaStudio() {
 
               {/* master scrubber */}
               <div ref={tlRef}
-                className="flex-1 h-6 relative cursor-pointer group"
+                className="flex-1 h-7 relative cursor-pointer group"
                 onMouseDown={e => { scrubTo(e.clientX);
                   const mv = ev => scrubTo(ev.clientX);
                   const up = () => { window.removeEventListener('mousemove', mv); window.removeEventListener('mouseup', up); };
                   window.addEventListener('mousemove', mv); window.addEventListener('mouseup', up);
                 }}>
-                <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 h-1.5 rounded-full bg-white/[0.07]" />
-                <div className="absolute top-1/2 -translate-y-1/2 h-1.5 rounded-full left-0"
-                  style={{ width: `${currentTime/duration*100}%`, background: `linear-gradient(90deg, ${ps.accent}88, ${ps.accent})` }} />
+                <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 h-2 rounded-full bg-white/[0.08]" />
+                <div className="absolute top-1/2 -translate-y-1/2 h-2 rounded-full left-0"
+                  style={{ width: `${currentTime/duration*100}%`, background: `linear-gradient(90deg, ${ps.accent}77, ${ps.accent})` }} />
                 {/* beat markers */}
                 {beats.map(b => (
                   <div key={b.id} title={b.label}
@@ -1953,17 +1954,17 @@ export default function CartaVivaStudio() {
             </div>
 
             {/* multi-track area */}
-            <div className="max-h-[120px] overflow-y-auto pr-1 space-y-1">
+            <div className="max-h-[130px] overflow-y-auto pr-1 space-y-1 scrollbar-thin">
               {trackGroups.map(g => (
                 <div key={g.label}>
-                  <div className="text-[8px] tracking-[0.18em] text-slate-700 font-bold mb-0.5">{g.label}</div>
+                  <div className="text-[8px] tracking-[0.16em] text-slate-600 font-bold mb-0.5 mt-0.5">{g.label}</div>
                   {g.items.map(L => (
-                    <div key={L.id} className="flex items-center gap-1.5 h-[15px] group/tr">
+                    <div key={L.id} className="flex items-center gap-1.5 h-[20px] group/tr">
                       <button onClick={() => setSelectedId(L.id === selectedId ? null : L.id)}
-                        className={`w-24 truncate text-left text-[9px] transition-colors ${selectedId === L.id ? 'text-[var(--cva)]' : 'text-slate-600 hover:text-slate-400'}`}>
+                        className={`w-[88px] truncate text-left text-[9px] transition-colors ${selectedId === L.id ? 'text-[var(--cva)]' : 'text-slate-600 hover:text-slate-400'}`}>
                         {L.name}
                       </button>
-                      <div className="flex-1 h-[9px] bg-white/[0.04] rounded relative">
+                      <div className="flex-1 h-[12px] bg-white/[0.04] rounded relative">
                         <div
                           onPointerDown={e => onSpanDown(e, L)}
                           className={`absolute h-full rounded cursor-grab active:cursor-grabbing transition-shadow ${selectedId === L.id ? 'ring-1 ring-white/70' : ''}`}
@@ -1986,7 +1987,7 @@ export default function CartaVivaStudio() {
               {/* audio track */}
               <div>
                 <div className="text-[8px] tracking-[0.18em] text-slate-700 font-bold mb-0.5 flex items-center gap-2">
-                  AUDIO / NARRAZIONE
+                  AUDIO
                   <label className="cursor-pointer text-[var(--cva)]/80 hover:text-[var(--cva)] normal-case tracking-normal flex items-center gap-1">
                     <Music className="w-2.5 h-2.5" /> {audio ? 'sostituisci' : 'carica voce narrante'}
                     <input type="file" accept="audio/*" className="hidden" onChange={onAudioFile} />
@@ -2013,11 +2014,23 @@ export default function CartaVivaStudio() {
           {/* properties */}
           <Section title={selected ? `Proprietà — ${selected.name}` : 'Proprietà layer'}>
             {!selected ? (
-              <div className="text-[10.5px] text-slate-600 leading-relaxed space-y-1">
-                <div>① Scegli uno strumento a sinistra</div>
-                <div>② Clicca sulla mappa</div>
-                <div>③ Regola timing nella timeline</div>
-                <div className="pt-1.5 text-slate-700">Scroll = zoom · Trascina = pan<br/>Spazio = play/pausa · Esc = annulla</div>
+              <div className="space-y-2">
+                <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-3 space-y-2.5">
+                  {[['1','Scegli uno strumento a sinistra'],['2','Clicca sulla mappa per aggiungere un layer'],['3','Seleziona un layer per modificarne le proprietà']].map(([n,t]) => (
+                    <div key={n} className="flex items-start gap-2.5 text-[10.5px] text-slate-600">
+                      <span className="w-4 h-4 rounded-md bg-white/[0.05] flex items-center justify-center text-[8px] text-slate-500 shrink-0 mt-px font-mono">{n}</span>
+                      <span className="leading-snug">{t}</span>
+                    </div>
+                  ))}
+                </div>
+                <div className="grid grid-cols-2 gap-1">
+                  {[['Scroll','zoom map'],['Drag','pan map'],['Spazio','play / pausa'],['Esc','annulla tool']].map(([k,v]) => (
+                    <div key={k} className="flex items-center gap-1.5 rounded-lg bg-white/[0.025] px-2 py-1.5">
+                      <span className="px-1.5 py-0.5 rounded bg-white/[0.06] text-[8px] font-mono text-slate-400">{k}</span>
+                      <span className="text-[9px] text-slate-600">{v}</span>
+                    </div>
+                  ))}
+                </div>
               </div>
             ) : (
               <div className="space-y-2.5">
@@ -2070,7 +2083,7 @@ export default function CartaVivaStudio() {
                     display={`${Math.round((selected.fillOpacity ?? 0.5)*100)}%`} onChange={v => upd(selected.id, { fillOpacity: v })} />
                   <PropSlider label="Bordo" value={selected.strokeWidth ?? 1.4} min={0} max={5} step={0.2}
                     display={`${(selected.strokeWidth ?? 1.4).toFixed(1)}px`} onChange={v => upd(selected.id, { strokeWidth: v })} />
-                  <PropToggle label="✦ Glow" active={selected.glow} onClick={() => upd(selected.id, { glow: !selected.glow })} />
+                  <PropToggle label="Glow" active={selected.glow} onClick={() => upd(selected.id, { glow: !selected.glow })} />
                 </>)}
 
                 {(selected.type === 'arrow' || selected.type === 'frontline') && (<>
@@ -2082,8 +2095,8 @@ export default function CartaVivaStudio() {
                     <PropSlider label="Curvatura" value={selected.curve ?? 0.28} min={-0.6} max={0.6} step={0.04}
                       display={(selected.curve ?? 0.28).toFixed(2)} onChange={v => upd(selected.id, { curve: v })} />
                     <div className="flex gap-1.5">
-                      <PropToggle label="✦ Glow" active={selected.glow} onClick={() => upd(selected.id, { glow: !selected.glow })} half />
-                      <PropToggle label="┄ Tratteggio" active={selected.dashed} onClick={() => upd(selected.id, { dashed: !selected.dashed })} half />
+                      <PropToggle label="Glow" active={selected.glow} onClick={() => upd(selected.id, { glow: !selected.glow })} half />
+                      <PropToggle label="Tratteggio" active={selected.dashed} onClick={() => upd(selected.id, { dashed: !selected.dashed })} half />
                     </div>
                   </>)}
                 </>)}
@@ -2091,7 +2104,7 @@ export default function CartaVivaStudio() {
                 {selected.type === 'zone' && (<>
                   <PropSlider label="Raggio" value={selected.radius ?? 45} min={8} max={180} step={2}
                     display={`${selected.radius ?? 45}`} onChange={v => upd(selected.id, { radius: v })} />
-                  <PropToggle label="◎ Pulsazione" active={selected.pulse} onClick={() => upd(selected.id, { pulse: !selected.pulse })} />
+                  <PropToggle label="Pulsazione" active={selected.pulse} onClick={() => upd(selected.id, { pulse: !selected.pulse })} />
                 </>)}
 
                 {selected.type === 'label' && (<>
@@ -2099,7 +2112,7 @@ export default function CartaVivaStudio() {
                   <PropInput label="Sottotesto" value={selected.subtext ?? ''} onChange={v => upd(selected.id, { subtext: v })} />
                   <PropSlider label="Dimensione" value={selected.fontSize ?? 14} min={8} max={30} step={1}
                     display={`${selected.fontSize ?? 14}px`} onChange={v => upd(selected.id, { fontSize: v })} />
-                  <PropToggle label="⌨ Font dattilografo" active={selected.mono} onClick={() => upd(selected.id, { mono: !selected.mono })} />
+                  <PropToggle label="Font dattilografo" active={selected.mono} onClick={() => upd(selected.id, { mono: !selected.mono })} />
                 </>)}
 
                 {selected.type === 'title' && (<>
@@ -2113,7 +2126,7 @@ export default function CartaVivaStudio() {
                       </button>
                     ))}
                   </div>
-                  <PropToggle label="🔴 Variante Breaking" active={selected.variant === 'breaking'}
+                  <PropToggle label="Variante Breaking" active={selected.variant === 'breaking'}
                     onClick={() => upd(selected.id, { variant: selected.variant === 'breaking' ? 'cinematic' : 'breaking' })} />
                 </>)}
 
@@ -2162,7 +2175,7 @@ export default function CartaVivaStudio() {
                   </div>
                   <PropSlider label="Dimensione" value={selected.size ?? 30} min={12} max={80} step={2}
                     display={`${selected.size ?? 30}px`} onChange={v => upd(selected.id, { size: v })} />
-                  <PropToggle label="✦ Glow" active={selected.glow} onClick={() => upd(selected.id, { glow: !selected.glow })} />
+                  <PropToggle label="Glow" active={selected.glow} onClick={() => upd(selected.id, { glow: !selected.glow })} />
                 </>)}
 
                 {selected.type === 'pie' && (<>
@@ -2198,7 +2211,7 @@ export default function CartaVivaStudio() {
             <div className="flex flex-wrap gap-1 mb-2.5">
               {STAMP_TEXTS.map(s => (
                 <button key={s} onClick={() => addStamp(s)}
-                  className="px-2 py-1 rounded border-2 border-double text-[8px] font-bold tracking-wider hover:scale-105 transition-transform"
+                  className="px-2 py-1 rounded border-2 border-double text-[8px] font-bold tracking-wider hover:brightness-125 active:scale-95 transition-all"
                   style={{ borderColor: ps.accent + '90', color: ps.accent, transform: 'rotate(-3deg)', fontFamily: "'Special Elite', monospace" }}>
                   {s}
                 </button>
@@ -2221,6 +2234,11 @@ export default function CartaVivaStudio() {
               className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded-lg border border-amber-700/50 text-amber-500 text-[10.5px] hover:bg-amber-950/30 transition-colors">
               <BookMarked className="w-3 h-3" /> Beat @ {currentTime.toFixed(1)}s
             </button>
+            {beats.length === 0 && (
+              <div className="mt-1.5 text-center text-[9px] text-slate-700 py-3 border border-dashed border-white/[0.06] rounded-lg leading-relaxed">
+                Nessun capitolo — aggiungi beat<br />per strutturare il video
+              </div>
+            )}
             {beats.length > 0 && (
               <div className="mt-1.5 space-y-1">
                 {beats.map(b => (
@@ -2250,7 +2268,8 @@ export default function CartaVivaStudio() {
                   return (
                     <Reorder.Item key={L.id} value={L} whileDrag={{ scale: 1.03, zIndex: 99 }}
                       onClick={() => setSelectedId(L.id === selectedId ? null : L.id)}
-                      className={`flex items-center gap-1.5 px-2 py-1 rounded-lg cursor-pointer border text-[10px] transition-all group ${selectedId === L.id ? 'bg-white/[0.07] border-white/20' : 'border-transparent hover:bg-white/[0.04]'}`}>
+                      className={`flex items-center gap-1.5 px-2 py-1.5 rounded-lg cursor-pointer text-[10px] transition-all group border ${selectedId === L.id ? 'border-[var(--cva)]/30 bg-[var(--cva)]/[0.07]' : 'border-transparent hover:bg-white/[0.04] hover:border-white/[0.05]'}`}
+                      style={selectedId === L.id ? { boxShadow: 'inset 2px 0 0 var(--cva)' } : {}}>
                       <span className="w-1.5 h-1.5 rounded-full shrink-0"
                         style={{ background: L.color || L.fill || L.accent || '#777', opacity: alpha > 0 ? 1 : 0.25 }} />
                       <Icon className="w-2.5 h-2.5 text-slate-600 shrink-0" />
@@ -2404,8 +2423,11 @@ export default function CartaVivaStudio() {
 /* ═══════════════════════ UI SUBCOMPONENTS ═════════════════════ */
 function Section({ title, children, last }) {
   return (
-    <div className={`p-3 ${last ? '' : 'border-b border-white/[0.05]'}`}>
-      <div className="text-[8.5px] uppercase tracking-[0.2em] text-slate-600 font-bold mb-2">{title}</div>
+    <div className={`px-3 py-3 ${last ? '' : 'border-b border-white/[0.05]'}`}>
+      <div className="flex items-center gap-2 mb-2.5">
+        <div className="w-[2px] h-3 rounded-full shrink-0" style={{ background: 'var(--cva)', opacity: 0.65 }} />
+        <div className="text-[9px] uppercase tracking-[0.2em] text-slate-500 font-bold">{title}</div>
+      </div>
       {children}
     </div>
   );
@@ -2413,9 +2435,9 @@ function Section({ title, children, last }) {
 
 function ToolBtn({ active, onClick, Icon, label }) {
   return (
-    <button onClick={onClick}
-      className={`flex items-center gap-1.5 px-2 py-[7px] rounded-lg text-[10px] border transition-all ${active ? 'border-[var(--cva)] bg-[var(--cva)]/12 text-[var(--cva)] shadow-[0_0_12px_-4px_var(--cva)]' : 'border-white/[0.06] text-slate-500 hover:text-slate-300 hover:border-white/15'}`}>
-      <Icon className="w-3 h-3 shrink-0" />
+    <button onClick={onClick} title={label}
+      className={`flex items-center gap-1.5 px-2 py-[8px] rounded-lg text-[10px] border transition-all ${active ? 'border-[var(--cva)]/60 bg-[var(--cva)]/15 text-[var(--cva)] shadow-[0_0_14px_-4px_var(--cva)]' : 'border-white/[0.06] text-slate-500 hover:text-slate-200 hover:border-white/15 hover:bg-white/[0.03]'}`}>
+      <Icon className="w-3.5 h-3.5 shrink-0" />
       <span className="truncate">{label}</span>
     </button>
   );
@@ -2426,7 +2448,7 @@ function PropInput({ label, value, onChange }) {
     <div>
       <div className="prop-label">{label}</div>
       <input value={value} onChange={e => onChange(e.target.value)}
-        className="w-full bg-black/40 border border-white/10 rounded-lg px-2 py-1.5 text-[10.5px] text-slate-200 outline-none focus:border-[var(--cva)]/60" />
+        className="w-full bg-black/40 border border-white/[0.1] rounded-lg px-2 py-1.5 text-[10.5px] text-slate-200 outline-none focus:border-[var(--cva)]/50 focus:bg-black/60 transition-colors" />
     </div>
   );
 }
@@ -2437,7 +2459,7 @@ function PropNum({ label, value, min, max, step, onChange }) {
       <div className="prop-label">{label}</div>
       <input type="number" min={min} max={max} step={step} value={Number(value).toFixed(1)}
         onChange={e => onChange(Number(e.target.value))}
-        className="w-full bg-black/40 border border-white/10 rounded-lg px-2 py-1.5 text-[10.5px] text-slate-200 outline-none focus:border-[var(--cva)]/60" />
+        className="w-full bg-black/40 border border-white/[0.1] rounded-lg px-2 py-1.5 text-[10.5px] text-slate-200 outline-none focus:border-[var(--cva)]/50 focus:bg-black/60 transition-colors [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none" />
     </div>
   );
 }
@@ -2458,7 +2480,8 @@ function PropSlider({ label, value, min, max, step, display, onChange }) {
 function PropToggle({ label, active, onClick, half }) {
   return (
     <button onClick={onClick}
-      className={`${half ? 'flex-1' : 'w-full'} py-1.5 rounded-lg border text-[10px] transition-all ${active ? 'border-[var(--cva)] text-[var(--cva)] bg-[var(--cva)]/10' : 'border-white/[0.07] text-slate-600 hover:text-slate-400'}`}>
+      className={`${half ? 'flex-1' : 'w-full'} flex items-center justify-center gap-1.5 py-1.5 rounded-lg border text-[10px] transition-all ${active ? 'border-[var(--cva)]/60 text-[var(--cva)] bg-[var(--cva)]/10' : 'border-white/[0.07] text-slate-600 hover:text-slate-300 hover:border-white/15'}`}>
+      <span className={`w-1.5 h-1.5 rounded-full shrink-0 transition-all ${active ? 'bg-[var(--cva)]' : 'bg-white/10'}`} />
       {label}
     </button>
   );
@@ -2482,18 +2505,22 @@ function MiniIcon({ kind, color }) {
 
 function Modal({ title, children, onClose, accent, wide }) {
   return (
-    <motion.div className="fixed inset-0 z-[150] flex items-center justify-center bg-black/70 backdrop-blur-md"
+    <motion.div className="fixed inset-0 z-[150] flex items-center justify-center bg-black/75 backdrop-blur-md"
       initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={onClose}>
       <motion.div
-        className={`${wide ? 'w-[420px]' : 'w-[340px]'} rounded-2xl p-5 space-y-3 border border-white/10 shadow-2xl`}
+        className={`${wide ? 'w-[420px]' : 'w-[340px]'} rounded-2xl overflow-hidden border border-white/10 shadow-[0_40px_80px_-20px_rgba(0,0,0,0.9)]`}
         style={{ background: 'linear-gradient(180deg, #141821, #0c0f16)' }}
-        initial={{ scale: 0.94, y: 12 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.94, y: 12 }}
+        initial={{ scale: 0.93, y: 16 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.93, y: 10 }}
+        transition={{ type: 'spring', stiffness: 400, damping: 30 }}
         onClick={e => e.stopPropagation()}>
-        <div className="flex items-center justify-between">
-          <div className="text-[13px] font-bold text-slate-100">{title}</div>
-          <button onClick={onClose} className="text-slate-600 hover:text-slate-300"><X className="w-4 h-4" /></button>
+        <div className="h-[3px]" style={{ background: `linear-gradient(90deg, ${accent}, ${accent}55, transparent)` }} />
+        <div className="p-5 space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="text-[13px] font-bold text-slate-100">{title}</div>
+            <button onClick={onClose} className="p-1.5 rounded-lg text-slate-600 hover:text-slate-200 hover:bg-white/[0.07] transition-colors"><X className="w-3.5 h-3.5" /></button>
+          </div>
+          {children}
         </div>
-        {children}
       </motion.div>
     </motion.div>
   );
