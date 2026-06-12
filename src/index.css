@@ -93,6 +93,16 @@ body {
   to { opacity: 1; transform: scale(1) translateY(0); }
 }
 
+/* CartaViva property labels */
+.prop-label {
+  display: block;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #64748b;
+  margin-bottom: 4px;
+}
+
 input[type="range"] {
   -webkit-appearance: none;
   appearance: none;
